@@ -1,0 +1,13 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Scaffold placeholder — regenerate with:
+#   dotnet new sln -n MovieSearch
+#   dotnet sln add src/MovieSearch.Api src/MovieSearch.Application \
+#                  src/MovieSearch.Domain src/MovieSearch.Infrastructure \
+#                  tests/MovieSearch.Tests
+#
+# Project layout (Clean Architecture):
+#   MovieSearch.Api            -> entry point, middleware, DI, endpoints, auth
+#   MovieSearch.Application    -> use cases, MCP client orchestration
+#   MovieSearch.Domain         -> entities, value objects, interfaces
+#   MovieSearch.Infrastructure -> MCP client impl, HTTP clients, caching
+#   MovieSearch.Tests          -> unit + integration tests

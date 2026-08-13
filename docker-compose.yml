@@ -1,0 +1,155 @@
+# ============================================================================
+# Movie Search Platform — local orchestration
+# Bring up the entire platform:  docker compose up --build
+# Run the one-shot data pipeline:  docker compose run --rm pipeline
+# ============================================================================
+
+x-common-env: &common-env
+  env_file:
+    - .env
+
+services:
+  # ---- PostgreSQL 16 + pgvector ---------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---- DB migrations (Flyway) -----------------------------------------------
+  # TODO: run migrations from ./database/migrations before pipeline/mcp start.
+  migrate:
+    image: flyway/flyway:10
+    <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./database/migrations:/flyway/sql
+    command: >
+      -url=jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      -user=${POSTGRES_USER} -password=${POSTGRES_PASSWORD}
+      -connectRetries=10 migrate
+
+  # ---- Embedding model server (own container) -------------------------------
+  # Ollama serving nomic-embed-text (768-dim). The entrypoint starts the server,
+  # pulls the model once (cached in the named volume), then keeps serving.
+  embeddings:
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull ${EMBEDDING_MODEL}
+        wait
+    ports:
+      - "8001:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      # Healthy only once the model is actually pulled and listed.
+      test: ["CMD-SHELL", "ollama list | grep -q ${EMBEDDING_MODEL}"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # ---- Data pipeline (runs and exits) ---------------------------------------
+  pipeline:
+    build: ./pipeline
+    <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      embeddings:
+        condition: service_healthy
+    volumes:
+      - ./reports:/app/reports
+
+  # ---- Python MCP server (FastMCP) ------------------------------------------
+  mcp-server:
+    build: ./mcp-server
+    <<: *common-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- .NET 10 Web API ------------------------------------------------------
+  api:
+    build: ./api
+    <<: *common-env
+    ports:
+      - "8080:8080"
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- Observability --------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+
+  # ---- Embedding visualization (bonus) --------------------------------------
+  atlas:
+    build: ./scripts/atlas
+    <<: *common-env
+    ports:
+      - "7000:7000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  ollama:

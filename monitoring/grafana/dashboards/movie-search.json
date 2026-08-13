@@ -1,0 +1,6 @@
+{
+  "__comment": "Scaffold placeholder. TODO: request rate & latency (p50/p95/p99), error rate, MCP tool call latency, active connections.",
+  "title": "Movie Search",
+  "schemaVersion": 39,
+  "panels": []
+}

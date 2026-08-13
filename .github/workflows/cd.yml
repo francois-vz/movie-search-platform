@@ -1,0 +1,22 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    # environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: run CI steps; configure AWS OIDC creds; push images to ECR;
+      #       terraform apply (dev); smoke tests against dev.
+
+  deploy-prod:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: prod   # manual approval gate via GitHub Environments
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: terraform apply (prod) after approval.

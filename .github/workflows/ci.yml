@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: setup-python 3.12; ruff check; mypy; pytest for pipeline + mcp-server
+
+  dotnet-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: setup-dotnet 10; dotnet format --verify-no-changes; dotnet test
+
+  docker-build-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: docker compose build; docker compose up -d; run integration smoke test
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: terraform fmt -check; init -backend=false; validate; plan (dev)
