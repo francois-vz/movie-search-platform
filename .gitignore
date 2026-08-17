@@ -38,8 +38,10 @@ override.tf.json
 # ---- Data / artifacts ----
 data/
 *.parquet
-reports/
 atlas_export/
+# Ignore runtime report artifacts but keep the living Section reports.
+# reports/*
+# !reports/section-1.md
 
 # ---- OS / editor ----
 .DS_Store

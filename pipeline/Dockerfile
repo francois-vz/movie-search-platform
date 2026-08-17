@@ -5,11 +5,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install dependencies first for better layer caching.
+# Source is required at install time because the project is installed from
+# pyproject (declared packages: src, src.pipeline).
 COPY pyproject.toml ./
+COPY src ./src
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
 
-COPY src ./src
+# Reports are written here; also bind-mounted from the host via docker-compose.
+RUN mkdir -p /app/reports
 
 # Runs the pipeline once and exits.
 CMD ["python", "-m", "src.main"]
