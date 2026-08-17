@@ -38,6 +38,10 @@ TestResults/
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+# Saved plans embed resolved values, including generated passwords. `terraform show`
+# redacts them for display, but the file itself does not.
+*.tfplan
+*.tfplan.*
 crash.log
 crash.*.log
 override.tf
