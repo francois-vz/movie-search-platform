@@ -11,7 +11,10 @@ public static class AuthEndpoints
             .WithName("IssueToken")
             .WithTags("Auth")
             .WithSummary("Issue a JWT via client credentials.")
-            .WithDescription("Exchange a reader or admin client id/secret for a Bearer token. Accepts JSON or form-urlencoded.")
+            .WithDescription(
+                "Exchange a reader or admin client id/secret for a Bearer token. Accepts JSON or form-urlencoded. "
+                + "Credentials come from AUTH_READER_CLIENT_ID/AUTH_READER_CLIENT_SECRET and the AUTH_ADMIN_* pair; "
+                + "substitute the value configured for this environment for the placeholder in the example.")
             .AllowAnonymous()
 
             // The handler takes HttpRequest so it can accept either content type,
