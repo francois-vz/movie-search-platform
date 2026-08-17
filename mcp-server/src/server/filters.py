@@ -10,6 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# Fallback only. The live value comes from MCPSettings.high_imdb_threshold
+# (HIGH_IMDB_THRESHOLD) and is passed in by the tool layer; this default keeps
+# extract_filters usable standalone.
 HIGH_IMDB_THRESHOLD = 7.5
 
 # Longer phrases first so "romantic comedy" is not captured as "comedy".
@@ -72,12 +75,16 @@ class SearchFilters:
     mpaa_rating: str | None = None
 
 
-def extract_filters(query: str) -> SearchFilters:
+def extract_filters(
+    query: str,
+    *,
+    high_imdb_threshold: float = HIGH_IMDB_THRESHOLD,
+) -> SearchFilters:
     """Infer hybrid filters from a natural-language query."""
     return SearchFilters(
         genre_filter=_extract_genre(query),
         decade=_extract_decade(query),
-        min_imdb_rating=HIGH_IMDB_THRESHOLD if _HIGH_IMDB_RE.search(query) else None,
+        min_imdb_rating=high_imdb_threshold if _HIGH_IMDB_RE.search(query) else None,
         mpaa_rating=_extract_mpaa(query),
     )
 
@@ -89,9 +96,10 @@ def resolve_filters(
     decade: int | None,
     min_imdb_rating: float | None,
     mpaa_rating: str | None,
+    high_imdb_threshold: float = HIGH_IMDB_THRESHOLD,
 ) -> SearchFilters:
     """Merge explicit tool args (winner) with filters parsed from query."""
-    extracted = extract_filters(query)
+    extracted = extract_filters(query, high_imdb_threshold=high_imdb_threshold)
     return SearchFilters(
         genre_filter=genre_filter if genre_filter is not None else extracted.genre_filter,
         decade=decade if decade is not None else extracted.decade,

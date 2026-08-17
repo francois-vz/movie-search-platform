@@ -4,6 +4,8 @@ Living report for Part 4. The API is a JWT-protected BFF over MCP; it does **not
 talk to Postgres. Part 3 can land independently: the API is built against
 `IMovieSearchClient`, with a fake implementation for tests and local work.
 
+The plan this part was built from: [plans/part-4-dotnet-api.plan.md](plans/part-4-dotnet-api.plan.md).
+
 ## Decisions
 
 - **Minimal APIs** rather than controllers: seven routes, OpenAPI 3.1 is first-class

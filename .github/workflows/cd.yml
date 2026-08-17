@@ -3,20 +3,252 @@ name: CD
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+# Never let two deployments race for the Terraform state lock.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: "1.9.8"
 
 jobs:
-  deploy-dev:
+  # Same gates as a pull request. A red CI never reaches an environment.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build-and-push:
+    name: Build and push images
+    needs: ci
     runs-on: ubuntu-latest
-    # environment: dev
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      # TODO: run CI steps; configure AWS OIDC creds; push images to ECR;
-      #       terraform apply (dev); smoke tests against dev.
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Resolve image tag
+        id: meta
+        # The git SHA, because the ECR repositories are tag-immutable: a tag
+        # always names one immutable image, so a rollback is a redeploy of an
+        # older SHA rather than a re-tag.
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Chicken and egg on a fresh account: the push below needs repositories
+      # that the main apply (which runs after it, because the services it
+      # creates need the images) has not made yet. Applying just the ecr module
+      # first breaks the cycle and is a no-op on every later run.
+      - name: Ensure ECR repositories exist
+        working-directory: terraform/environments/dev
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform apply -input=false -auto-approve -target=module.platform.module.ecr
+        env:
+          TF_VAR_github_repository: ${{ github.repository }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ steps.meta.outputs.image_tag }}
+          PREFIX: movie-search-dev
+        run: |
+          set -euo pipefail
+          build() {
+            local name="$1" context="$2" dockerfile="$3"
+            local repo="${REGISTRY}/${PREFIX}/${name}"
+            echo "::group::${name}"
+            docker buildx build \
+              --file "${dockerfile}" \
+              --tag "${repo}:${TAG}" \
+              --cache-from "type=gha,scope=${name}" \
+              --cache-to "type=gha,mode=max,scope=${name}" \
+              --push \
+              "${context}"
+            echo "::endgroup::"
+          }
+
+          build api        ./api        ./api/Dockerfile
+          build mcp-server ./mcp-server ./mcp-server/Dockerfile
+          build pipeline   ./pipeline   ./pipeline/Dockerfile
+          build migrate    ./database   ./database/Dockerfile
+
+  deploy-dev:
+    name: Deploy dev
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      api_url: ${{ steps.outputs.outputs.api_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Terraform apply
+        working-directory: terraform/environments/dev
+        env:
+          TF_VAR_image_tag: ${{ needs.build-and-push.outputs.image_tag }}
+          TF_VAR_github_repository: ${{ github.repository }}
+          TF_VAR_certificate_arn: ${{ vars.DEV_CERTIFICATE_ARN }}
+          TF_VAR_domain_name: ${{ vars.DEV_DOMAIN_NAME }}
+          TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform apply -input=false -auto-approve
+
+      - name: Read outputs
+        id: outputs
+        working-directory: terraform/environments/dev
+        run: |
+          echo "api_url=$(terraform output -raw api_url)" >> "$GITHUB_OUTPUT"
+          echo "cluster=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "migrate_family=$(terraform output -raw migrate_task_definition_arn)" >> "$GITHUB_OUTPUT"
+          terraform output -json run_task_network_configuration > /tmp/netcfg.json
+
+      # Schema changes ship with the images, so migrations run after the push
+      # and before the services are exercised. Flyway is idempotent: a run with
+      # nothing new to apply is a no-op.
+      - name: Run database migrations
+        env:
+          CLUSTER: ${{ steps.outputs.outputs.cluster }}
+          TASK_DEF: ${{ steps.outputs.outputs.migrate_family }}
+        run: ./scripts/run_ecs_task.sh "$CLUSTER" "$TASK_DEF" /tmp/netcfg.json
+
+      - name: Wait for the service to stabilise
+        env:
+          CLUSTER: ${{ steps.outputs.outputs.cluster }}
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER" \
+            --services "movie-search-dev-api" "movie-search-dev-mcp-server"
+
+      - name: Smoke test dev
+        env:
+          BASE_URL: ${{ steps.outputs.outputs.api_url }}
+          AUTH_READER_CLIENT_SECRET: ${{ secrets.DEV_READER_CLIENT_SECRET }}
+          AUTH_ADMIN_CLIENT_SECRET: ${{ secrets.DEV_ADMIN_CLIENT_SECRET }}
+        run: ./scripts/smoke_test.sh
 
   deploy-prod:
-    needs: deploy-dev
+    name: Deploy prod
+    needs: [build-and-push, deploy-dev]
     runs-on: ubuntu-latest
-    environment: prod   # manual approval gate via GitHub Environments
+    # The manual approval gate. Configure required reviewers on the `prod`
+    # environment in the repository settings; the job blocks until one approves.
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
-      # TODO: terraform apply (prod) after approval.
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Ensure ECR repositories exist
+        working-directory: terraform/environments/prod
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform apply -input=false -auto-approve -target=module.platform.module.ecr
+        env:
+          TF_VAR_github_repository: ${{ github.repository }}
+
+      # Prod pulls the same digests that dev just validated. Nothing is
+      # rebuilt between environments.
+      - name: Promote images to the prod repositories
+        env:
+          TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          REGION: ${{ vars.AWS_REGION }}
+        run: ./scripts/promote_images.sh "$TAG" "$REGION" movie-search-dev movie-search-prod
+
+      - name: Terraform apply
+        working-directory: terraform/environments/prod
+        env:
+          TF_VAR_image_tag: ${{ needs.build-and-push.outputs.image_tag }}
+          TF_VAR_github_repository: ${{ github.repository }}
+          TF_VAR_certificate_arn: ${{ vars.PROD_CERTIFICATE_ARN }}
+          TF_VAR_domain_name: ${{ vars.PROD_DOMAIN_NAME }}
+          TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform apply -input=false -auto-approve
+
+      - name: Read outputs
+        id: outputs
+        working-directory: terraform/environments/prod
+        run: |
+          echo "api_url=$(terraform output -raw api_url)" >> "$GITHUB_OUTPUT"
+          echo "cluster=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "migrate_family=$(terraform output -raw migrate_task_definition_arn)" >> "$GITHUB_OUTPUT"
+          terraform output -json run_task_network_configuration > /tmp/netcfg.json
+
+      - name: Run database migrations
+        env:
+          CLUSTER: ${{ steps.outputs.outputs.cluster }}
+          TASK_DEF: ${{ steps.outputs.outputs.migrate_family }}
+        run: ./scripts/run_ecs_task.sh "$CLUSTER" "$TASK_DEF" /tmp/netcfg.json
+
+      - name: Wait for the service to stabilise
+        env:
+          CLUSTER: ${{ steps.outputs.outputs.cluster }}
+        run: |
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER" \
+            --services "movie-search-prod-api" "movie-search-prod-mcp-server"
+
+      - name: Smoke test prod
+        env:
+          BASE_URL: ${{ steps.outputs.outputs.api_url }}
+          AUTH_READER_CLIENT_SECRET: ${{ secrets.PROD_READER_CLIENT_SECRET }}
+          AUTH_ADMIN_CLIENT_SECRET: ${{ secrets.PROD_ADMIN_CLIENT_SECRET }}
+        run: ./scripts/smoke_test.sh

@@ -5,7 +5,9 @@
 -- Dimensionality: vector(768) matches nomic-embed-text (Ollama).
 -- Unique key: (lower(title), release_year) WHERE both are non-null —
 -- the same natural key 1.1 cleaning uses. title is nullable so the one
--- untitled 2006 Vega row is not rejected; 1.5 decides drop vs synthetic title.
+-- untitled 2006 Vega row is not rejected by the schema; the 1.5 loader skips
+-- it at load time and counts it, because a NULL title cannot participate in
+-- the unique index and would therefore re-insert on every run.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -57,7 +59,8 @@ CREATE TABLE IF NOT EXISTS movies (
 
 -- Idempotent upsert target for 1.5. Partial so NULL title/year rows (the
 -- untitled 2006 record, any unparseable date) are excluded from uniqueness;
--- Postgres unique indexes do not collide on NULL anyway.
+-- Postgres unique indexes do not collide on NULL anyway. The loader's
+-- ON CONFLICT target must match this index definition exactly.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_movies_title_year
     ON movies (lower(title), release_year)
     WHERE title IS NOT NULL AND release_year IS NOT NULL;

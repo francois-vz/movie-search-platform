@@ -3,39 +3,165 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # Callable from cd.yml so a push to main runs the identical gates.
+  workflow_call:
+
+# A new push to the same PR makes the in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  DOTNET_VERSION: "10.0.x"
+  TERRAFORM_VERSION: "1.9.8"
 
 jobs:
   python-lint-test:
+    name: Python (ruff, mypy, pytest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # TODO: setup-python 3.12; ruff check; mypy; pytest for pipeline + mcp-server
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install workspace
+        run: uv sync --all-packages --dev
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      # Type checking targets shipped code. The test suites use fixtures and
+      # monkeypatching that strict mode flags without saying anything useful
+      # about the artifacts we deploy.
+      - name: Mypy (pipeline)
+        working-directory: pipeline
+        run: uv run mypy src
+
+      - name: Mypy (mcp-server)
+        working-directory: mcp-server
+        run: uv run mypy src
+
+      - name: Pytest (pipeline)
+        working-directory: pipeline
+        run: uv run pytest -q
+
+      - name: Pytest (mcp-server)
+        working-directory: mcp-server
+        run: uv run pytest -q
 
   dotnet-lint-test:
+    name: .NET (format, xunit)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: api
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
       - name: Restore
         run: dotnet restore MovieSearch.sln
+
       - name: Format
         run: dotnet format MovieSearch.sln --verify-no-changes --no-restore
+
       - name: Test
         run: dotnet test MovieSearch.sln --configuration Release --no-restore
 
   docker-build-integration:
+    name: Docker build + compose integration
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      # TODO: docker compose build; docker compose up -d; run integration smoke test
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Provide .env
+        run: cp .env.example .env
+
+      # `docker compose build` rather than buildx bake: bake derives image names
+      # from its target names, which do not match the `<project>-<service>` tags
+      # `compose up` then looks for, so the images would be silently rebuilt.
+      # The cost is no cross-run layer cache -- worth revisiting with
+      # COMPOSE_BAKE once the runners have a new enough Compose.
+      - name: Build images
+        run: docker compose build
+
+      # The pipeline and atlas are excluded on purpose: both are data jobs that
+      # embed the full dataset, which would dominate CI runtime without testing
+      # anything the smoke test does not already cover. Starting `api` pulls in
+      # postgres, migrate, embeddings, mcp-server and jaeger through depends_on.
+      - name: Start the platform
+        run: docker compose up -d --wait api
+
+      - name: Smoke test
+        run: ./scripts/smoke_test.sh
+        env:
+          BASE_URL: http://localhost:8080
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
 
   terraform-validate:
+    name: Terraform (fmt, validate, plan)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      # TODO: terraform fmt -check; init -backend=false; validate; plan (dev)
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Format check
+        run: terraform fmt -check -recursive terraform/
+
+      # -backend=false so validation needs no AWS credentials and no state.
+      - name: Validate
+        run: |
+          set -euo pipefail
+          for dir in terraform terraform/bootstrap terraform/environments/dev terraform/environments/prod; do
+            echo "::group::validate ${dir}"
+            terraform -chdir="${dir}" init -backend=false -input=false
+            terraform -chdir="${dir}" validate
+            echo "::endgroup::"
+          done
+
+      # A real plan needs real credentials, so it only runs when the OIDC role
+      # is configured. Forks and credential-less runs still get fmt + validate.
+      - name: Configure AWS credentials
+        id: aws
+        if: vars.AWS_DEPLOY_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Plan (dev)
+        if: steps.aws.outcome == 'success'
+        working-directory: terraform/environments/dev
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform plan -input=false -no-color -out=tfplan
+        env:
+          TF_VAR_github_repository: ${{ github.repository }}

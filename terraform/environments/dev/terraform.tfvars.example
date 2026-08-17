@@ -1,0 +1,14 @@
+# Dev environment inputs.
+#
+# TLS: set either certificate_arn (an existing ACM cert) or domain_name +
+# route53_zone_id (Terraform requests and DNS-validates one). With neither, the
+# ALB serves HTTP only and the plan will tell you so.
+
+aws_region = "eu-west-1"
+
+# certificate_arn = "arn:aws:acm:eu-west-1:123456789012:certificate/xxxxxxxx"
+# domain_name     = "api.dev.example.com"
+# route53_zone_id = "ZXXXXXXXXXXXXX"
+
+# alarm_email       = "oncall@example.com"
+# github_repository = "your-org/movie-search-platform"

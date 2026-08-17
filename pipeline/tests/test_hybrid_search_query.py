@@ -35,6 +35,9 @@ def test_hybrid_search_sql_is_vector_plus_metadata_filters() -> None:
         "rt_rating",
     ):
         assert column in select_sql
+    # match_type tells callers this score is cosine, not the trigram score
+    # title_fuzzy.sql returns on the same field.
+    assert "'semantic'::text AS match_type" in select_sql
 
 
 def test_v1_unique_key_matches_cleaning_contract() -> None:

@@ -1,0 +1,7 @@
+# Copy to backend.hcl and fill in the bucket created by terraform/bootstrap.
+#   terraform init -backend-config=backend.hcl
+#
+# backend.hcl is gitignored: the bucket name embeds the AWS account id.
+
+bucket = "movie-search-tfstate-123456789012"
+region = "eu-west-1"

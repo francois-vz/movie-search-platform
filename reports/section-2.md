@@ -4,6 +4,8 @@ Living report for PostgreSQL 16 + pgvector (Part 2 of the assessment). Schema an
 indexes live under `database/migrations/`; the hybrid query is documented (not
 applied by Flyway) at `database/queries/hybrid_search.sql`.
 
+The plan this part was built from: [plans/part-2-vector-db.plan.md](plans/part-2-vector-db.plan.md).
+
 **How to apply**
 
 ```bash
@@ -11,11 +13,13 @@ docker compose up -d postgres
 docker compose run --rm migrate
 ```
 
-The `mcp-server` and `atlas` services wait on `migrate` completing. The 1.1
-pipeline still runs with `--no-deps` and does **not** need this database yet:
+The `mcp-server` and `atlas` services wait on `migrate` completing. The full
+pipeline writes to this database; only `--dry-run` (transform stages 1.1–1.3)
+runs without it:
 
 ```bash
-docker compose run --rm --no-deps pipeline
+docker compose run --rm pipeline                       # clean → … → load
+docker compose run --rm --no-deps pipeline --dry-run   # no DB, no model server
 ```
 
 **Resetting after schema edits**
@@ -28,7 +32,7 @@ docker compose down -v
 ```
 
 Do not add a separate seed script. The brief says the seed **is** the pipeline
-(Part 1.5 / `loader.py`), which is not implemented yet.
+(Part 1.5 / `loader.py`).
 
 ---
 
@@ -61,14 +65,21 @@ CREATE UNIQUE INDEX uq_movies_title_year
 No separate `natural_key` column. Remakes with different years survive
 (*The Mummy* 1999 vs 2002).
 
-**Untitled row.** The live Vega file has one row with a null title
-(`Release_Date` = 2006-11-03). `title` is **nullable** so that row is not
-rejected. Postgres unique indexes do not collide on NULL, so 1.5 must still
-decide drop vs a synthetic title (e.g. `"(untitled)"`) if that one row should
-upsert idempotently. The partial `WHERE` makes that hole explicit rather than
-hiding it.
+**Untitled row — resolved.** The live Vega file has one row with a null title
+(`Release_Date` = 2006-11-03). `title` is **nullable** so the schema does not
+reject it, but Postgres unique indexes do not collide on NULL, so that row has
+no natural key and would re-insert on every run. This report previously left
+the choice — drop, or synthesise a title — open for 1.5.
 
-**1.5 upsert shape** (for when the loader lands):
+**The loader skips it and counts it** (`rows_skipped_no_key` in the load
+report, with examples). A synthetic `"(untitled)"` was rejected: it would be
+returned to API clients and embedded into the Atlas map as though it were a
+real title, trading a visible one-row gap for an invisible fabrication. One
+unsearchable row out of 3,201 is the cheaper failure, and the count makes it
+auditable. The partial `WHERE` keeps the hole explicit in the schema rather
+than hiding it.
+
+**1.5 upsert shape** (as implemented in `pipeline/src/pipeline/loader.py`):
 
 ```sql
 INSERT INTO movies (...)
@@ -77,6 +88,10 @@ ON CONFLICT (lower(title), release_year)
     WHERE title IS NOT NULL AND release_year IS NOT NULL
 DO UPDATE SET ... , updated_at = NOW();
 ```
+
+The `ON CONFLICT` target must match `uq_movies_title_year` exactly or Postgres
+cannot infer the index and the upsert silently becomes an insert;
+`pipeline/tests/test_loader.py` asserts the two agree.
 
 ---
 
@@ -119,7 +134,9 @@ The HNSW index is partial `WHERE embedding IS NOT NULL` for the same reason.
 
 Documented at `database/queries/hybrid_search.sql`. Vector cosine distance
 (`<=>`) plus optional genre / decade / min IMDB / MPAA filters. Similarity is
-returned as `1 - distance`.
+returned as `1 - distance`, tagged `match_type = 'semantic'` so callers can
+tell it apart from the trigram score `title_fuzzy.sql` returns on the same
+field (see `reports/section-3.md`).
 
 Example: *"action movies from the 90s with high IMDB ratings"* binds
 `$2 = 'Action'`, `$3 = 1990`, `$4 = 7.5`, `$5` null.
@@ -127,12 +144,26 @@ Example: *"action movies from the 90s with high IMDB ratings"* binds
 Part 3 binds `$1` as the `search_query:` embedding from Ollama. That prefix is
 an MCP concern, not schema.
 
-Contract tests: `pipeline/tests/test_hybrid_search_query.py`.
+### Testing
+
+`pipeline/tests/test_hybrid_search_query.py` pins the SQL text and the V1/V2
+contract. Text assertions cannot catch a query Postgres would reject, so
+`mcp-server/tests/test_sql_execution.py` applies these migrations to a
+throwaway database and executes every query for real:
+
+```bash
+MCP_TEST_DSN=postgresql://movies:change_me_local_only@localhost:5432/movies pytest
+```
+
+It skips without that variable and has not been run here — no Docker daemon on
+this machine — so the migrations remain applied-by-Flyway-in-Compose only.
 
 ---
 
 ## Follow-ups (not Part 2)
 
-- **1.5 loader** upserts into this table; decides the untitled-row policy.
 - **Part 3** uses `hybrid_search.sql` and registers an asyncpg `vector` codec.
 - **Part 6** runs the same Flyway SQL against RDS (pgvector + pg_trgm allowed).
+- CI has no Postgres service, so `MCP_TEST_DSN` / `PIPELINE_TEST_DSN` tests
+  never run there. Adding a `services: postgres` block to the Python job would
+  turn both suites on.

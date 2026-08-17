@@ -1,0 +1,13 @@
+# Prod environment inputs.
+#
+# TLS is not optional here: set certificate_arn, or domain_name plus
+# route53_zone_id so Terraform requests and DNS-validates a certificate.
+
+aws_region = "eu-west-1"
+
+# certificate_arn = "arn:aws:acm:eu-west-1:123456789012:certificate/xxxxxxxx"
+# domain_name     = "api.example.com"
+# route53_zone_id = "ZXXXXXXXXXXXXX"
+
+# alarm_email       = "oncall@example.com"
+# github_repository = "your-org/movie-search-platform"

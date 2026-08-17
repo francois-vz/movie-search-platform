@@ -14,8 +14,11 @@
 -- see a higher-is-better score in [0, 1] for normalized embeddings.
 --
 -- SELECT list matches MCP MovieResult (id, title, release_year, major_genre,
--- mpaa_rating, director, distributor, imdb_rating, rt_rating, similarity).
--- Bind parameters $1–$6 are unchanged from the Part 2 contract.
+-- mpaa_rating, director, distributor, imdb_rating, rt_rating, similarity,
+-- match_type). Bind parameters $1–$6 are unchanged from the Part 2 contract.
+--
+-- match_type = 'semantic' tells callers the score is cosine similarity, so it
+-- is never confused with the trigram score returned by title_fuzzy.sql.
 --
 -- Example NL query this shape covers:
 --   "action movies from the 90s with high IMDB ratings"
@@ -34,7 +37,8 @@ SELECT
     distributor,
     imdb_rating,
     rt_rating,
-    1 - (embedding <=> $1::vector) AS similarity
+    1 - (embedding <=> $1::vector) AS similarity,
+    'semantic'::text AS match_type
 FROM movies
 WHERE embedding IS NOT NULL
   AND ($2::text    IS NULL OR major_genre = $2)

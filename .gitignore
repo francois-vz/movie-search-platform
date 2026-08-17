@@ -45,8 +45,14 @@ override.tf.json
 # Keep lockfile tracked; ignore local override secrets if someone names them this way
 secrets.auto.tfvars
 *.secret.tfvars
+# Backend config embeds the AWS account id (bucket name). Commit only the example.
+backend.hcl
+!backend.hcl.example
 
 # ---- Data / artifacts ----
+# Run artifacts land in <cwd>/reports; when the pipeline is run from pipeline/
+# rather than in its container that is pipeline/reports.
+pipeline/reports/
 data/
 *.parquet
 atlas_export/
@@ -57,9 +63,17 @@ reports/*
 !reports/section-3.md
 !reports/section-4.md
 !reports/section-5.md
+!reports/section-6.md
+# Executed plan per part, kept alongside the section reports.
+!reports/plans/
 
 # API log files (Serilog file sink)
 api/**/logs/
+
+# ---- Assessment source material (not our deliverable) ----
+# The brief itself is Derivco's document; the export is a Cursor chat transcript.
+senior-ai-engineer-assessment*.pdf
+export.md
 
 # ---- OS / editor ----
 .DS_Store

@@ -28,7 +28,7 @@ class EmbeddingClient:
         self._owns_client = http_client is None
         self._http = http_client or httpx.AsyncClient(
             base_url=settings.embedding_base_url,
-            timeout=60.0,
+            timeout=settings.embedding_timeout_seconds,
         )
 
     def _prefixed(self, query: str) -> str:

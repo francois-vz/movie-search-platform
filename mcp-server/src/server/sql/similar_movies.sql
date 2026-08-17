@@ -19,7 +19,8 @@ SELECT
     m.distributor,
     m.imdb_rating,
     m.rt_rating,
-    1 - (m.embedding <=> q.embedding) AS similarity
+    1 - (m.embedding <=> q.embedding) AS similarity,
+    'semantic'::text AS match_type
 FROM movies m
 CROSS JOIN query q
 WHERE m.embedding IS NOT NULL

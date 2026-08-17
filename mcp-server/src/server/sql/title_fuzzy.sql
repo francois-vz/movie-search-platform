@@ -12,7 +12,8 @@ SELECT
     distributor,
     imdb_rating,
     rt_rating,
-    similarity(title, $1)::double precision AS similarity
+    similarity(title, $1)::double precision AS similarity,
+    'fuzzy'::text AS match_type
 FROM movies
 WHERE title IS NOT NULL
   AND title % $1

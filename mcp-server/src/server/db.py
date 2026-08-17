@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
-import asyncpg  # type: ignore[import-untyped]
+import asyncpg
 from pgvector.asyncpg import register_vector
 
 from ..config import MCPSettings
@@ -26,9 +26,26 @@ def _load_sql(name: str) -> str:
 HYBRID_SEARCH_SQL = _load_sql("hybrid_search.sql")
 TITLE_EXACT_SQL = _load_sql("title_exact.sql")
 TITLE_FUZZY_SQL = _load_sql("title_fuzzy.sql")
+MOVIE_BY_ID_SQL = _load_sql("movie_by_id.sql")
 SIMILAR_MOVIES_SQL = _load_sql("similar_movies.sql")
 LIST_GENRES_SQL = _load_sql("list_genres.sql")
 DATASET_STATS_SQL = _load_sql("dataset_stats.sql")
+
+# Every row-returning query must project exactly these, or row_to_movie breaks.
+# tests/test_sql_contract.py asserts it without needing a database.
+MOVIE_COLUMNS: tuple[str, ...] = (
+    "id",
+    "title",
+    "release_year",
+    "major_genre",
+    "mpaa_rating",
+    "director",
+    "distributor",
+    "imdb_rating",
+    "rt_rating",
+    "similarity",
+    "match_type",
+)
 
 
 def _as_float(value: object) -> float | None:
@@ -68,10 +85,11 @@ def row_to_movie(row: asyncpg.Record) -> MovieResult:
         imdb_rating=_as_float(row["imdb_rating"]),
         rt_rating=_as_int(row["rt_rating"]),
         similarity=_as_float(row["similarity"]),
+        match_type=row["match_type"],
     )
 
 
-async def _init_connection(conn: asyncpg.Connection) -> None:  # type: ignore[type-arg]
+async def _init_connection(conn: asyncpg.Connection) -> None:
     await register_vector(conn)
 
 
@@ -139,6 +157,13 @@ async def get_movie_by_title(title: str) -> MovieResult | None:
         row = await conn.fetchrow(TITLE_EXACT_SQL, title)
         if row is None:
             row = await conn.fetchrow(TITLE_FUZZY_SQL, title)
+    return row_to_movie(row) if row is not None else None
+
+
+async def get_movie_by_id(movie_id: UUID) -> MovieResult | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(MOVIE_BY_ID_SQL, movie_id)
     return row_to_movie(row) if row is not None else None
 
 

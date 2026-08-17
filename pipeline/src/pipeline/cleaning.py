@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
 import pandas as pd
 
@@ -134,11 +135,11 @@ class CleaningReport:
     numeric_zero_as_missing: dict[str, int] = field(default_factory=dict)
     numeric_coerced: dict[str, int] = field(default_factory=dict)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _is_na(value: object) -> bool:
+def _is_na(value: Any) -> bool:
     if value is None:
         return True
     try:
@@ -148,27 +149,27 @@ def _is_na(value: object) -> bool:
     return bool(result) if not hasattr(result, "any") else False
 
 
-def _values_differ(left: object, right: object) -> bool:
+def _values_differ(left: Any, right: Any) -> bool:
     left_na, right_na = _is_na(left), _is_na(right)
     if left_na and right_na:
         return False
     if left_na or right_na:
         return True
-    return left != right
+    return bool(left != right)
 
 
 def _collapse_ws(text: str) -> str:
     return _WS.sub(" ", text).strip()
 
 
-def _normalize_title_key(value: object) -> str:
+def _normalize_title_key(value: Any) -> str:
     """Lowercase + trim + collapse whitespace. Keying only — does not mutate title."""
     if _is_na(value):
         return ""
     return _collapse_ws(str(value)).lower()
 
 
-def _shift_century(ts: object) -> object:
+def _shift_century(ts: Any) -> Any:
     """Subtract 100 years from a timestamp, preserving month/day."""
     if _is_na(ts):
         return ts
@@ -186,7 +187,7 @@ def rename_columns(df: pd.DataFrame, report: CleaningReport) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 
-def _standardize_one(value: object, column: str) -> object:
+def _standardize_one(value: Any, column: str) -> Any:
     if _is_na(value):
         return value
     if column == "title" and not isinstance(value, str):
@@ -265,12 +266,14 @@ def parse_release_dates(df: pd.DataFrame, report: CleaningReport) -> pd.DataFram
     if n_century:
         examples: list[dict[str, str]] = []
         sample = work.loc[century_mask].head(10)
+        year_by_index = years.to_dict()
+        raw_by_index = raw_str.to_dict()
         for idx, row in sample.iterrows():
-            old_year = int(years.loc[idx])
+            old_year = int(year_by_index[idx])
             examples.append(
                 {
                     "title": "" if _is_na(row.get("title")) else str(row.get("title")),
-                    "raw": str(raw_str.loc[idx]),
+                    "raw": str(raw_by_index[idx]),
                     "from_year": str(old_year),
                     "to_year": str(old_year - 100),
                 }
@@ -338,8 +341,8 @@ def remove_duplicates(df: pd.DataFrame, report: CleaningReport) -> pd.DataFrame:
     dropped = keyed_sorted[dropped_mask]
     kept_keyed = keyed_sorted[~dropped_mask]
 
-    report.duplicates_removed = int(len(dropped))
-    report.rows_missing_dedup_key = int(len(unkeyed))
+    report.duplicates_removed = len(dropped)
+    report.rows_missing_dedup_key = len(unkeyed)
     report.duplicate_examples = [
         {
             "title": "" if _is_na(row[title_col]) else str(row[title_col]),

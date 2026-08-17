@@ -5,6 +5,8 @@ Living report for Part 5: visualize the Part 2 `movies` embeddings in
 `http://localhost:7000`. Atlas is a **reader**. It does not seed Postgres; the
 1.5 pipeline remains the only writer.
 
+The plan this part was built from: [plans/part-5-atlas.plan.md](plans/part-5-atlas.plan.md).
+
 **How to run**
 
 ```bash

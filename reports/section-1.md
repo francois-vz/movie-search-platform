@@ -5,17 +5,36 @@ each step is implemented and documents **what we are doing and why**. Machine-re
 run artifacts (regenerated on every run) are written alongside this file, e.g.
 `reports/section-1-cleaning.json`.
 
-**How to run (1.1 only)**
+The plan this part was built from: [plans/part-1-data-pipeline.plan.md](plans/part-1-data-pipeline.plan.md).
+
+**How to run**
 
 ```bash
-./build.sh                       # build the pipeline image
-docker compose run --rm --no-deps pipeline
-# or: ./build.sh --run
+docker compose run --rm pipeline              # full run: clean -> ... -> load
+docker compose run --rm --no-deps pipeline --dry-run   # 1.1-1.3 only, no DB
 ```
 
-`--no-deps` is intentional for 1.1: cleaning does not need Postgres, Flyway, or
-the Ollama embedding server. Those `depends_on` edges stay in `docker-compose.yml`
-for the full platform and will be honoured again when 1.4/1.5 land.
+The full run needs `postgres`, `migrate` and `embeddings`; Compose waits for all
+three. `--dry-run` stops after augmentation, so it needs none of them — useful
+when iterating on cleaning or feature rules.
+
+Artifacts, all regenerated per run under `reports/`:
+
+| File | Contents |
+| ---- | -------- |
+| `section-1-cleaning.json` | the 1.1 `CleaningReport` |
+| `section-1-pipeline.json` | every stage report from the run |
+| `pipeline.log` | full run log (the brief's required log file) |
+
+**Stage status**
+
+| Stage | Status | Code |
+| ----- | ------ | ---- |
+| 1.1 Cleaning | Done | `cleaning.py` |
+| 1.2 Imputation | Done | `imputation.py` |
+| 1.3 Feature augmentation | Done | `augmentation.py` |
+| 1.4 Embedding generation | Done | `embedding.py` |
+| 1.5 Pipeline execution / load | Done | `loader.py`, `main.py` |
 
 ---
 
@@ -232,13 +251,217 @@ flagged; 9 numeric titles stringified; 22 years century-corrected to 1915–1946
 
 ---
 
-### Follow-ups for later stages (not 1.1)
+---
 
-- **1.2** owns filling `mpaa_rating` / `director` / `running_time_min` / ratings
-  nulls. Cleaning deliberately left them null.
-- **1.5 loader:** the untitled 2006 row cannot use `(lower(title), release_year)`
-  as a conflict target while `title` is NULL. Decide then (drop, synthetic
-  title, or a surrogate key). Postgres will not treat two NULL titles as a
-  unique-index collision.
-- Restore `docker compose run pipeline` *without* `--no-deps` once embeddings
-  and the upsert exist.
+## 1.2 Imputation
+
+**Code:** `pipeline/src/pipeline/imputation.py`
+
+Measured missingness after cleaning (3,201 rows) — this drove every decision
+below, and it is why the fields the brief names are not treated alike:
+
+| Field | Missing | % |
+| ----- | ------: | -: |
+| `running_time_min` | 1,992 | 62.2 |
+| `director` | 1,331 | 41.6 |
+| `rt_rating` | 880 | 27.5 |
+| `mpaa_rating` | 605 | 18.9 |
+| `creative_type` | 446 | 13.9 |
+| `source` | 365 | 11.4 |
+| `major_genre` | 275 | 8.6 |
+| `distributor` | 232 | 7.2 |
+| `imdb_rating` / `imdb_votes` | 213 | 6.7 |
+| `production_budget` | 1 | 0.03 |
+
+### Rule 1 — descriptive categoricals get an explicit `"Unknown"`
+
+`mpaa_rating`, `director`, `distributor`, `creative_type`, `source`.
+
+Mode imputation was considered and **rejected**. Filling 1,331 missing directors
+with the modal name would assert that those films were made by someone who did
+not make them, and the brief's own example query is *"sci-fi films directed by
+James Cameron"*. The same argument applies to distributor ("animated family
+movies distributed by Disney"). A wrong fact is worse than an absent one when
+the field is something users search on by name.
+
+### Rule 2 — numerics get a group median, flagged per cell
+
+`imdb_rating`, `rt_rating`, `running_time_min` group by `major_genre`;
+`production_budget` groups by `decade` (nominal budgets inflate over time).
+Every filled cell sets the matching `<column>_imputed` boolean that V1 already
+reserves, so nothing downstream has to guess whether a 6.4 was observed.
+
+**Group choice is measured, not assumed.** Genre x decade looked attractive but
+yields 75 cells of which 28 hold fewer than 5 rows — medians from those are
+noise. Genre alone, with a floor of `MIN_GROUP_SIZE = 10` observations before a
+group median is trusted, is the compromise. Rows below the floor, and rows whose
+genre is itself missing, fall back to the global median.
+
+How that played out:
+
+| Field | Filled | via group median | via global median |
+| ----- | -----: | ---------------: | ----------------: |
+| `imdb_rating` | 213 | 179 | 34 |
+| `rt_rating` | 880 | 737 | 143 |
+| `running_time_min` | 1,992 | 1,653 | 339 |
+| `production_budget` | 1 | 1 | 0 |
+
+### `major_genre` is deliberately left NULL
+
+It is a **facet**, not a description: MCP `list_genres` advertises it and
+`genre_filter` matches on it. An `"Unknown"` genre would become a browsable
+category in Atlas and a selectable filter value that means nothing. The 275
+rows stay NULL and are simply absent from the genre list.
+
+### What imputation does *not* do
+
+It fills columns, not the embedding input. 1.3 renders only observed facts, so a
+filled runtime never reaches the embedding model — see below.
+
+**Known trade-off.** A filled `imdb_rating` can still satisfy a
+`min_imdb_rating` filter in hybrid search. The medians (6.4 IMDB, 55 RT) sit
+well below the 7.5 threshold the MCP server extracts for "highly rated", so the
+practical impact is small, and `imdb_rating_imputed` is stored so a future
+`AND NOT imdb_rating_imputed` predicate can close it properly.
+
+---
+
+## 1.3 Feature Augmentation
+
+**Code:** `pipeline/src/pipeline/augmentation.py`
+
+### Augmented text contains observed facts only
+
+The brief's template is rendered line for line, but **a line is dropped when its
+value was missing, imputed, or is the `"Unknown"` sentinel**. A fully observed
+row therefore reproduces the brief's template exactly (asserted by
+`tests/test_augmentation.py`), while a sparse row is simply shorter. Mean length
+on the real dataset is 10.02 of 12 lines; no row renders empty.
+
+Two alternatives were rejected:
+
+- **Render the imputed value.** `Runtime: 107 minutes` on the 62% of rows whose
+  runtime was never recorded embeds a claim the data does not support, and the
+  vector is what search actually ranks on.
+- **Render `Runtime: Unknown`.** That string is *identical* across every
+  affected row, so it actively pulls unrelated films together in vector space
+  purely because they share a gap. Silence carries no such signal.
+
+Example — *The Land Girls*, whose genre is missing and whose runtime and RT
+score were imputed:
+
+```
+Title: The Land Girls
+MPAA Rating: R
+Release Year: 1998
+IMDB Rating: 6.1/10 (1,071 votes)
+Budget: $8,000,000
+Distributor: Gramercy
+```
+
+The untitled 2006 row keeps its nine observed lines and just omits `Title:`.
+
+### Derived features (four, exceeding the required two)
+
+| Feature | Definition | Why |
+| ------- | ---------- | --- |
+| `decade` | `floor(release_year / 10) * 10` | The MCP `decade` filter binds to it directly; "movies from the 90s" becomes a SQL predicate instead of a hope. |
+| `budget_tier` | `<$15M` indie · `<$50M` mid · `<$100M` major · else blockbuster | Turns a raw dollar figure into the vocabulary people search with ("small budgets" in query 3.3 #2). |
+| `rating_score_delta` | `imdb_rating x 10 − rt_rating` | Separates critic and audience opinion, which neither rating does alone — the axis behind "critically acclaimed" (3.3 #2) and "low Rotten Tomatoes" (3.3 #5). |
+| `blockbuster_flag` | `worldwide_gross >= max($100M, 2 x production_budget)` | Commercial outcome, which budget alone misses. Both halves matter: the floor stops a cheap film doubling its money from qualifying, the multiple stops a $200M gross on a $250M budget from qualifying. |
+
+Fixed budget thresholds rather than sample quartiles: they are the industry's
+own vocabulary (a "$15M indie" means the same thing in any corpus) and stay
+comparable if the dataset is refreshed. Observed quartiles for reference are
+$6.6M / $20M / $42M.
+
+All four are computed from **observed** inputs only and are NULL otherwise —
+they feed Atlas facets and API responses, where a guess would be
+indistinguishable from a measurement. Coverage on the real run: `decade` 3,201,
+`budget_tier` 3,200, `rating_score_delta` 2,260, `blockbuster_flag` 3,147.
+Tiers land at indie 1,305 / mid 1,197 / major 527 / blockbuster 171.
+
+---
+
+## 1.4 Embedding Generation
+
+**Code:** `pipeline/src/pipeline/embedding.py`
+
+- **Model:** `nomic-embed-text` on the Compose `embeddings` service (Ollama),
+  **768 dimensions**, matching `vector(768)` in V1. It runs as its own
+  container; the pipeline only speaks HTTP to it.
+- **Prefixes.** Nomic is asymmetric. Stored documents use `search_document: `
+  here; the MCP server uses `search_query: ` on the query side. Getting these
+  backwards silently degrades retrieval rather than failing, so both sides
+  assert their own prefix and the pipeline refuses to double-apply it.
+- **Batching** at `EMBEDDING_BATCH_SIZE` (default 32), progress logged per batch.
+- **Retries** with exponential backoff (tenacity, 4 attempts) on transport
+  errors and HTTP failures.
+- **Fallback** to the legacy single-text `/api/embeddings` endpoint if
+  `/api/embed` returns 404.
+- **Validation.** Every vector is length-checked against `EMBEDDING_DIM`, and
+  the batch response is count-checked against its input. A batch that still
+  fails after retries **raises**: a partial load would leave the corpus quietly
+  incomplete, which is far harder to notice than a failed run.
+
+---
+
+## 1.5 Pipeline Execution
+
+**Code:** `pipeline/src/pipeline/loader.py`, `pipeline/src/main.py`
+
+### Idempotency
+
+The loader upserts on the V1 partial unique index
+`(lower(title), release_year) WHERE title IS NOT NULL AND release_year IS NOT
+NULL` — the same natural key 1.1 de-duplicates on. Re-running updates in place;
+`updated_at` is left to the V1 trigger rather than being set redundantly in the
+`DO UPDATE`. Remakes survive, because the key includes the year.
+
+### The untitled row — decided
+
+1.1 and Part 2 both left this open. **Decision: rows with no natural key are
+skipped and counted**, surfaced in the run summary and as a `WARNING`.
+
+A NULL title cannot participate in the unique index (Postgres does not collide
+NULLs), so such a row would be inserted afresh on *every* run — directly
+violating the idempotency requirement. The alternative, minting a synthetic
+title like `"(untitled 2006-11-03)"`, was rejected because that string is not a
+title and would be served to API clients through `MovieResult.title` as though
+it were one. It affects exactly one row of 3,201; the row is otherwise
+data-rich, so this is a real if tiny loss, recorded rather than hidden.
+
+### Execution
+
+`main.py` chains 1.1 → 1.5, prints a per-stage summary to **stdout**, and writes
+the same detail to **`reports/pipeline.log`** — the brief asks for both. Rows
+are upserted in transactional chunks of 500 with progress logging.
+
+### Verification
+
+```bash
+docker compose run --rm pipeline    # run twice; row count must not change
+docker compose exec postgres psql -U movies -d movies \
+  -c "SELECT COUNT(*) total, COUNT(embedding) embedded FROM movies;"
+```
+
+Unit tests cover imputation strategy, text rendering, derived-feature edges,
+batching/retry/prefix behaviour, and parameter binding. Idempotency itself needs
+a real database, so it lives in `tests/test_loader_integration.py`, skipped
+unless `PIPELINE_TEST_DSN` points at a throwaway Postgres:
+
+```bash
+PIPELINE_TEST_DSN=postgresql://movies:...@localhost:5432/movies pytest
+```
+
+---
+
+### Follow-ups
+
+- The integration tests above have **not been executed** — no Docker daemon was
+  available in the environment where 1.2-1.5 were written. The upsert SQL is
+  unit-tested against the V1 index definition but has not yet been run by
+  Postgres.
+- `vega_datasets.data.movies()` fetches over the network at runtime (`movies`
+  is not in the locally bundled set), so the pipeline container needs egress.
+  Vendoring the CSV would make runs hermetic.
