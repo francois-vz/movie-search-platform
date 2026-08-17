@@ -64,17 +64,13 @@ reports/*
 !reports/section-4.md
 !reports/section-5.md
 !reports/section-6.md
-# Independent audit of Parts 1–5, superseded but kept as the audit record.
-!reports/quality_check_1-to-5.md
-# Evidence log for what has been observed running, and the remaining work.
-# README links to both, so they have to survive a clone.
-!reports/verification.md
-!reports/outstanding.md
 # Executed plan per part, kept alongside the section reports.
 !reports/plans/
-# Local working document; deliberately not a deliverable. Listed after the
-# negations above so it stays ignored regardless of what they re-include.
-reports/manual-testing.md
+# Everything else under reports/ is a working note and stays ignored by the
+# `reports/*` rule above: the evidence log (verification.md), the remaining-work
+# tracker (outstanding.md), the video script (walkthrough.md), the superseded
+# Parts 1-5 audit (quality_check_1-to-5.md) and manual-testing.md. Whatever a
+# reviewer needs from them belongs in README.md or in a section report.
 
 # API log files (Serilog file sink)
 api/**/logs/

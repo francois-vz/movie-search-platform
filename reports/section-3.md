@@ -129,8 +129,15 @@ docker compose up -d postgres
 MCP_TEST_DSN=postgresql://movies:change_me_local_only@localhost:5432/movies pytest
 ```
 
-It TRUNCATEs `movies`, so never point it at a database that matters. It skips
-by default and has **not** been run here — no Docker daemon on this machine.
+It TRUNCATEs `movies`, so never point it at a database that matters. It skips by
+default; with `MCP_TEST_DSN` set the suite is **64 passed** (58 passed / 6 skipped
+without it), and CI now supplies the Postgres service so it runs on every PR.
+
+Running it for the first time exposed that its own fixtures were wrong — three
+collinear vectors that all tied at similarity 1.0, so the ranking assertions were
+really checking row order. Detail in
+[`section-2.md`](section-2.md#testing), because it is a statement about the vector
+query rather than about the server.
 
 ---
 
@@ -183,6 +190,19 @@ the tool body runs in the stream's task, not in the POST that delivered the
 message, so the middleware's binding is frequently not visible by the time a
 tool executes — and under `stdio` there is no HTTP request at all.
 
+**It was also, at one point, breaking SSE entirely.** The middleware subclassed
+Starlette's `BaseHTTPMiddleware`, which buffers responses and is incompatible with
+streaming ones, so every `GET /sse` raised `AssertionError: Unexpected message` and
+logged a traceback — the transport the brief specifies for local use did not work at
+all. It is raw ASGI middleware now.
+
+Nothing caught it because no test opened the SSE transport: the Python tests call
+tool functions directly and the .NET tests ran against a fake client. The fix for
+that gap is `LiveMcpTests` on the .NET side, which performs a real SSE handshake
+against this server and is described in [`section-4.md`](section-4.md#testing).
+The lesson generalises past this bug — an integration boundary that both sides mock
+is a boundary nobody tests.
+
 `_tool_span` now resolves the id itself. If one is already bound it is left
 alone, so an HTTP-derived id still wins; otherwise it reads `traceparent` /
 `x-request-id` from FastMCP's request context and falls back to a generated id.
@@ -211,12 +231,33 @@ separate images.
 
 ---
 
+## What the 3.3 queries actually return
+
+Filter extraction was always unit-tested; what the *embedding* half retrieves was
+not, because that needs a live Ollama and a loaded corpus. Both have now run, and
+all five of the brief's example queries return relevant results through the API,
+asserted by [`scripts/e2e_test.sh`](../scripts/e2e_test.sh). "Action movies from
+the 90s" gives The Matrix (1999, Action), Toy Story (1995) and Alien; the genre,
+`min_imdb_rating` and decade filters each constrain the result set as expected, and
+`get_similar_movies` excludes its own seed.
+
+That is relevance by inspection rather than by metric. There is no labelled
+relevance set for this corpus, so there is no recall@k or nDCG here, and claiming
+otherwise would be inventing a ground truth. Building one is the honest next step
+if retrieval quality ever needs to be *defended* rather than demonstrated.
+
+---
+
 ## Follow-ups (not Part 3)
 
-- **Part 4** calls these tools over SSE (`MCP_SERVER_URL`). The tool-name and
-  argument contract is now enforced from the Python side
-  (`test_dotnet_contract.py`), but nothing yet exercises a real SSE handshake
-  end to end.
-- The 3.3 ranking quality remains unmeasured: it needs a live Ollama and a
-  loaded corpus, neither of which has run on this machine. Filter extraction is
-  fully tested; what the embedding half retrieves is not.
+- **Part 4** calls these tools over SSE (`MCP_SERVER_URL`). Both directions are now
+  pinned: `test_dotnet_contract.py` checks tool names and argument keys from the
+  Python side, and `LiveMcpTests` exercises a real SSE handshake and asserts on
+  deserialized fields from the .NET side.
+- **No `/metrics` endpoint here.** The brief asks for Prometheus metrics on the
+  .NET API and this server is not required to expose any, so Prometheus scrapes
+  only the API. MCP tool latency is still visible, because the API records
+  `mcp_tool_call_duration` per tool around its own calls — the Grafana panel the
+  brief asks for is fed from the caller's side. Adding a FastMCP ASGI metrics route
+  would give server-side timings that exclude network and client overhead, which is
+  the one thing the current arrangement cannot separate.

@@ -404,6 +404,31 @@ Tiers land at indie 1,305 / mid 1,197 / major 527 / blockbuster 171.
   fails after retries **raises**: a partial load would leave the corpus quietly
   incomplete, which is far harder to notice than a failed run.
 
+**Why Ollama rather than the suggested `ai/nomic-embed-text-v1.5` image.** The
+brief names that image as a suggestion and invites substitutes. Ollama serves the
+same Nomic weights at the same 768 dimensions, and it was chosen for two reasons:
+one HTTP contract (`POST /api/embed`) serves both the pipeline and the MCP server,
+and the model file can be persisted on a volume, which is what makes the AWS
+version viable — see the EFS note in [`section-6.md`](section-6.md). The cost is a
+heavier image and a first-boot model pull, which is why the `embeddings` service
+has a generous healthcheck start period.
+
+**What happened on the real dataset (observed run)**
+
+- **3,201** texts embedded at **768** dimensions, batches of 32, in roughly
+  **80 seconds** on this machine. Zero batch failures, so the retry path is
+  exercised only by unit tests.
+- Re-run during a later audit: the whole pipeline completed in **61 seconds**,
+  exit code 0.
+
+**One real hardcoded value.** `REQUEST_TIMEOUT_SECONDS = 120.0` in `embedding.py`
+is not configurable, unlike the batch size, dimension and model name. 3.2 asks for
+environment-based configuration with no hardcoded values, and this is the one place
+Part 1 does not meet it. It is deliberate rather than forgotten — the timeout has
+to outlive a cold model load, and a too-short value configured by mistake turns
+into confusing retry storms — but the honest fix is another environment variable
+with 120 s as the default.
+
 ---
 
 ## 1.5 Pipeline Execution
@@ -437,6 +462,21 @@ data-rich, so this is a real if tiny loss, recorded rather than hidden.
 the same detail to **`reports/pipeline.log`** — the brief asks for both. Rows
 are upserted in transactional chunks of 500 with progress logging.
 
+### The bug that only a real database could find
+
+The loader bound **explicit NULLs for absent imputation flags**, and the
+`NOT NULL DEFAULT FALSE` columns in V1 rejected them. A column DEFAULT applies
+only when the column is *omitted* from the INSERT, and the loader always binds
+every column by name, so the default never had a chance to fire. Absent now maps
+to `FALSE`.
+
+It is worth recording because of *why* it shipped: the loader's unit tests assert
+on the SQL text and the parameter tuple, never on Postgres accepting them. Text
+assertions cannot distinguish valid SQL from SQL that a database will refuse. That
+is the same weakness `mcp-server/tests/test_sql_execution.py` was added to cover
+for the query side (see [`section-2.md`](section-2.md#testing)), and the reason the
+integration test below is worth running rather than merely having.
+
 ### Verification
 
 ```bash
@@ -454,14 +494,28 @@ unless `PIPELINE_TEST_DSN` points at a throwaway Postgres:
 PIPELINE_TEST_DSN=postgresql://movies:...@localhost:5432/movies pytest
 ```
 
+**Observed:** **3,200 upserted, 1 skipped** — the untitled 2006 record, exactly as
+decided above. A second run reports the same 3,200 total, so idempotency holds in
+practice and not just in the index definition. `pytest` is **66 passed** with
+`PIPELINE_TEST_DSN` set and 62 passed / 4 skipped without one; CI now supplies a
+`pgvector/pgvector:pg16` service so those four run there too, and asserts that they
+did rather than letting a broken DSN silently drop the coverage.
+
+Note that the DSN-gated tests `TRUNCATE movies`, so never point `PIPELINE_TEST_DSN`
+at the loaded database.
+
 ---
 
 ### Follow-ups
 
-- The integration tests above have **not been executed** — no Docker daemon was
-  available in the environment where 1.2-1.5 were written. The upsert SQL is
-  unit-tested against the V1 index definition but has not yet been run by
-  Postgres.
 - `vega_datasets.data.movies()` fetches over the network at runtime (`movies`
   is not in the locally bundled set), so the pipeline container needs egress.
-  Vendoring the CSV would make runs hermetic.
+  Vendoring the CSV would make runs hermetic and is the single change that would
+  most improve reproducibility here.
+- `REQUEST_TIMEOUT_SECONDS` should become an environment variable, per 1.4 above.
+- `docker compose up --wait` **does not wait for this pipeline.** It returns when
+  containers are running or healthy, and a run-to-completion job with no
+  healthcheck satisfies that immediately, so the loader is often still embedding.
+  Anything asserting on loaded data needs `docker compose wait pipeline` first.
+  See [`section-6.md`](section-6.md#61-docker-compose) for why the job has no
+  healthcheck.

@@ -155,15 +155,53 @@ throwaway database and executes every query for real:
 MCP_TEST_DSN=postgresql://movies:change_me_local_only@localhost:5432/movies pytest
 ```
 
-It skips without that variable and has not been run here — no Docker daemon on
-this machine — so the migrations remain applied-by-Flyway-in-Compose only.
+**Both layers now run.** With `MCP_TEST_DSN` set the suite is 64 passed (58 passed
+/ 6 skipped without it), and CI supplies a `pgvector/pgvector:pg16` service so the
+gated tests run on every PR — plus an explicit assertion that they *did* run, since
+a mistyped DSN would otherwise turn six real tests into six silent skips. The
+migrations have also been applied for real by Flyway in Compose, twice from an
+empty volume.
+
+**A passing test that asserted nothing.** The execution tests seeded three fixture
+vectors as `[0.10] * 768`, `[0.11] * 768` and `[0.90] * 768`. Those are the same
+direction and differ only in magnitude, and cosine distance ignores magnitude — so
+all three tied at similarity 1.0, and every "ranks by cosine similarity" assertion
+was really asserting the physical order rows came back in. The fixtures now differ
+in direction.
+
+This is the more instructive failure of the two the database found, because the
+test was green throughout. A DSN-gated test that runs and asserts the wrong thing
+is worse than one that skips loudly: the skip is visible in the summary line.
+
+### What the planner actually does
+
+At 3,200 rows Postgres sequential-scans and sorts rather than using the HNSW index.
+`EXPLAIN` on a kNN query against the loaded database:
+
+```
+ Limit
+   ->  Sort
+         Sort Key: ((movies.embedding <=> $1))
+         ->  Seq Scan on movies
+               Filter: (embedding IS NOT NULL)
+```
+
+That is the planner being right, not a misconfiguration — scanning 3,200 rows is
+genuinely cheaper than traversing a graph index — and it is part of why the observed
+p95 for search is single-digit milliseconds. The index is still correct to have: the
+brief asks for it, it costs almost nothing at this size, and it is the difference
+between milliseconds and minutes at a million rows. Worth stating plainly rather
+than implying the index is doing work it is not.
 
 ---
 
 ## Follow-ups (not Part 2)
 
 - **Part 3** uses `hybrid_search.sql` and registers an asyncpg `vector` codec.
-- **Part 6** runs the same Flyway SQL against RDS (pgvector + pg_trgm allowed).
-- CI has no Postgres service, so `MCP_TEST_DSN` / `PIPELINE_TEST_DSN` tests
-  never run there. Adding a `services: postgres` block to the Python job would
-  turn both suites on.
+- **Part 6** runs the same Flyway SQL against RDS (pgvector + pg_trgm allowed),
+  which needs no extra Terraform: RDS ships `vector` as an available extension for
+  PostgreSQL 16 and V1 creates it as the master user.
+- A filled `imdb_rating` can satisfy a `min_imdb_rating` filter, since imputation
+  writes real values into the column. The `*_imputed` booleans exist so an
+  `AND NOT imdb_rating_imputed` predicate could close that; nothing binds it yet.
+  Reasoning in [`section-1.md`](section-1.md#12-imputation).

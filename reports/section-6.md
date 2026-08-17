@@ -7,8 +7,10 @@ CI/CD (6.3). Terraform lives in [`terraform/`](../terraform), with usage in
 The plan this part was built from: [plans/part-6-infrastructure-devops.plan.md](plans/part-6-infrastructure-devops.plan.md).
 
 **Status:** Compose, all eight Terraform modules, both environment roots and
-both workflows are implemented. `terraform validate` passes on every root; the
-dev `plan` is the reviewable artifact (see "Verification" below).
+both workflows are implemented. `fmt` and `validate` pass on every root, and the
+dev `plan` — the artifact the brief asks to see — is clean against a real AWS
+account: **143 to add, 0 to change, 0 to destroy**, no errors or warnings. Nothing
+has been applied. Details under [Verification](#verification).
 
 ---
 
@@ -39,6 +41,24 @@ on `docker compose up` would have contradicted the brief. Those stages have
 since landed, so the profile is gone: `docker compose up --build` now brings up
 the platform *and* seeds it, which is what the brief actually asks for. The
 loader is idempotent, so a repeat `up` re-runs the pipeline harmlessly.
+
+**Two services deliberately have no healthcheck**, which is a stated exception to
+the brief's "all services" rule rather than an omission. `migrate` and `pipeline`
+are run-to-completion jobs: a healthcheck describes a process that keeps running,
+and the meaningful signal for a job is its **exit code**. Dependents therefore use
+`condition: service_completed_successfully`, which is the correct Compose primitive
+for the shape, and `docker compose wait pipeline` is how a script blocks on the
+load.
+
+**`docker compose up --wait` does not wait for the pipeline**, and this caught out
+both CI and the README before it was understood. `--wait` returns once containers
+are *running or healthy*, and a run-to-completion job with no healthcheck satisfies
+that the moment it starts, so the loader is usually still embedding when the command
+returns. Anything asserting on loaded data needs an explicit
+`docker compose wait pipeline`. On a cold start the problem is partly masked, because
+`atlas` polls for embeddings and only reports healthy once they exist — so `--wait`
+blocks by accident. Relying on that is fragile: a *failed* pipeline then presents as
+an atlas health timeout instead of the actual error.
 
 ## 6.2 Terraform
 
@@ -220,12 +240,12 @@ runs the identical gates rather than a copy of them.
 
 | Job | What it does |
 | --- | ------------ |
-| `python-lint-test` | `uv sync`, `ruff check`, `mypy`, `pytest` for both packages |
+| `python-lint-test` | `uv sync`, `ruff check`, `mypy`, `pytest` for both packages, against a `pgvector/pgvector:pg16` service |
 | `dotnet-lint-test` | `dotnet format --verify-no-changes`, `dotnet test` |
-| `docker-build-integration` | Buildx with GHA layer cache, `compose up -d --wait api`, then the smoke test |
+| `docker-build-integration` | Buildx with GHA layer cache, the **whole** stack up, `wait pipeline`, smoke + end-to-end + live-MCP tests |
 | `terraform-validate` | `fmt -check -recursive`, `init -backend=false` + `validate` on all four roots, `plan` for dev |
 
-Three decisions worth recording:
+Decisions worth recording:
 
 - **mypy runs against `src`, not tests.** Both packages set `strict = true`.
   Shipped code passes; the test suites use fixtures and monkeypatching that
@@ -234,19 +254,36 @@ Three decisions worth recording:
   `ignore_missing_imports` override (matching how `asyncpg` and `vega_datasets`
   were already handled), and two stale `# type: ignore` comments removed from
   `mcp-server/src/server/db.py`.
-- **`ruff format --check` is not a gate.** Eight files across Parts 1–5 are not
-  formatter-clean. Reformatting code owned by other sections from inside Part 6
-  would be a large, unrelated diff; the brief specifies ruff *lint* and mypy,
-  which both pass. Worth a follow-up commit.
-- **The integration test skips `pipeline` and `atlas`.** Starting `api` pulls in
-  postgres, migrate, embeddings, mcp-server and jaeger through `depends_on`,
-  which is the path worth testing. Embedding the full dataset on a CI runner
-  would dominate runtime without exercising anything
-  [`scripts/smoke_test.sh`](../scripts/smoke_test.sh) does not already cover.
-  That script asserts health, 401 without a token, 200 for a reader searching,
-  **403 for a reader hitting an admin route**, 200 for an admin, and that the
-  OpenAPI document is served. It deliberately does not assert non-empty
-  results: an empty database returning `[]` with a 200 is correct behaviour.
+- **`ruff format --check` is not a gate.** Eleven files across Parts 1–5 are not
+  formatter-clean (six in `pipeline`, five in `mcp-server`). The brief specifies
+  ruff *lint* and mypy, both of which pass; adding the formatter as a gate would
+  mean a large reformatting diff across code owned by other parts. Worth a
+  follow-up commit, and cheap — `ruff format` would do it — but it is churn, not
+  a correctness fix.
+- **The Python job now has a database.** Ten tests across the two packages are
+  gated on `PIPELINE_TEST_DSN` / `MCP_TEST_DSN` and used to skip in CI, which meant
+  the only tests that ran real SQL ran only on a developer's machine. A
+  `pgvector/pgvector:pg16` service plus both DSNs turns them on, and two extra
+  steps **fail the job** if those modules report as skipped — otherwise a typo in a
+  DSN silently returns CI to where it started, and the summary line still says
+  green.
+- **The integration job starts the whole platform.** It used to bring up `api` and
+  whatever `depends_on` dragged in, which skipped `pipeline` and `atlas` — so CI
+  never proved the thing the brief actually asks for, `docker compose up --build` on
+  a clean machine. It now builds every image including `database/Dockerfile`, starts
+  everything, blocks on `docker compose wait pipeline`, and runs
+  [`scripts/smoke_test.sh`](../scripts/smoke_test.sh),
+  [`scripts/e2e_test.sh`](../scripts/e2e_test.sh) and the .NET live-MCP tests.
+  Building `database/Dockerfile` matters on its own: Compose bind-mounts the SQL, so
+  `compose build` never touched the `migrate` image that CD pushes to ECR.
+- **Two test scripts, deliberately.** `smoke_test.sh` asserts routing and policy —
+  health, 401 without a token, reader search 200, **reader on an admin route 403**,
+  admin 200, OpenAPI served — and deliberately does *not* assert non-empty results,
+  because an empty database returning `[]` with a 200 is correct behaviour. That
+  makes it safe to run before the pipeline finishes. `e2e_test.sh` is the one that
+  asserts on data, so it needs the load to have completed. Keeping them separate
+  means a failure says either "the platform is misrouted" or "the data is wrong",
+  not both at once.
 
 **cd.yml** runs CI, then builds and pushes SHA-tagged images, applies dev, runs
 migrations, waits for the services to stabilise, smoke tests dev, and then
@@ -269,48 +306,128 @@ prod.
   main apply creates services that need the images. Applying only
   `module.platform.module.ecr` breaks the cycle and is a no-op on every later
   run.
+- **`atlas` is not built for ECR.** It is a local-only bonus that Terraform does not
+  deploy, so pushing a 9.6 GB image to a registry nothing pulls from would be pure
+  cost. CI still builds it, so it cannot rot unnoticed.
+
+**The `prod` environment had no protection rules**, which is worth recording as the
+gap with the sharpest teeth on this part. `cd.yml` was written to block on manual
+approval by targeting the `prod` GitHub Environment — but a GitHub environment with
+no rules configured does not pause for anything, so the approval gate the brief asks
+for existed in the workflow file and nowhere in reality: a push to `main` would have
+applied straight to production. A `required_reviewers` rule is now configured on the
+environment.
+
+The general lesson is that an approval gate lives in repository configuration, not in
+the workflow, so it is invisible to code review and to `act`. The only way to know is
+to query it — `gh api repos/:owner/:repo/environments/prod`.
 
 Required repository configuration is listed in
 [`terraform/README.md`](../terraform/README.md).
 
 ## Verification
 
-What was actually run, not just written:
+What was actually run, not just written.
 
-- **Compose, end to end.** `docker compose up -d` from a clean build brings up
-  all ten services. `migrate` and `pipeline` both exit 0; the pipeline upserted
-  3200 of 3201 rows with embeddings (the one skip is the untitled 2006 record
-  with no natural key). Every long-lived service reports healthy, including the
-  three new healthchecks, and Grafana correctly waits for Prometheus to be
-  healthy rather than merely created.
-- **The CI integration path specifically.** `docker compose up -d --wait api`
-  exits 0, which proves the `depends_on` chain resolves without starting the
-  data jobs.
-- **Smoke test: 13/13 pass** against the live stack — health, 401 unauthenticated,
-  reader search 200, reader on `/api/v1/stats` **403**, admin 200, OpenAPI served.
-- **Semantic search returns sensible results.** "action movies from the 90s"
-  gives The Matrix (1999, Action), Toy Story (1995), Alien.
-- **Terraform:** `fmt -check -recursive` is clean and `validate` passes on all
-  four roots (composition module, bootstrap, dev, prod).
-- **Python:** `ruff check`, `mypy src` and `pytest` pass for both packages
-  (62 passed / 4 skipped, and 56 passed / 6 skipped).
+### Compose
+
+- **From an empty Docker state.** `docker compose down -v` then
+  `docker compose up --build` brings up all ten services; `migrate` and `pipeline`
+  both exit 0, and the pipeline upserted **3,200 of 3,201** rows with embeddings
+  (the skip is the untitled 2006 record with no natural key). Every long-lived
+  service reports healthy, and Grafana waits for Prometheus to be healthy rather
+  than merely created.
+- **Idempotency.** A second run leaves the table at 3,200. A later re-run via
+  `up -d --wait` plus `wait pipeline` completed in 61 seconds, exit code 0.
+- **Smoke test 13/13** against the live stack, and `e2e_test.sh` passes — all five
+  of the brief's natural-language queries return relevant results, filters
+  constrain, `similar` excludes its seed, and `/stats` agrees with the row count in
+  pgvector.
 - Healthcheck endpoints and probe binaries were confirmed by running each
   observability image rather than assumed.
 
+### Terraform
+
+`fmt -check -recursive` is clean, `validate` passes on all four roots, and the dev
+`plan` against account `209211310020` in `eu-west-1` is **143 to add, 0 to change,
+0 to destroy** with no errors and no warnings.
+
+A plan is worth more than a `validate` here because it resolves data sources and
+computed values, so the brief's hard requirements can be read off the plan instead
+of inferred from HCL:
+
+| Requirement | Value in the plan |
+| --- | --- |
+| RDS not public | `publicly_accessible: false`, private subnets |
+| RDS encrypted | `storage_encrypted: true`, Postgres 16, `db.t4g.micro` |
+| ALB | internet-facing, `drop_invalid_header_fields: true` |
+| Autoscaling on CPU **and** memory | CPU 60% and memory 70% target tracking on all three services |
+| VPC Flow Logs | `traffic_type: ALL` to CloudWatch Logs |
+
+Three failure modes that normally surface only during an apply are also settled:
+there is no pre-existing GitHub OIDC provider to collide with, the region is at 1 of
+5 VPCs and 0 of 5 EIPs so the NAT gateways fit, and all five data sources resolve.
+
+**The plan used a temporary local backend**, because `terraform/bootstrap` has not
+been applied and the state bucket does not exist. So S3 state and DynamoDB locking
+remain configured but unexercised, and the dev root's `.terraform` is now
+initialised for a local backend — a real init needs `-reconfigure`.
+
+**Only one listener is planned: HTTP on port 80.** That is the plan-level
+confirmation that TLS is off, and it follows from having no certificate rather than
+from missing configuration. Reasoning under [HTTPS](#https-is-off-and-why-the-plan-shows-it)
+below.
+
+### Test suites
+
+| Suite | Result |
+| --- | --- |
+| `pipeline` pytest | 62 passed / 4 skipped without a DSN; **66 passed** with one |
+| `mcp-server` pytest | 58 passed / 6 skipped without a DSN; **64 passed** with one |
+| `dotnet test` | **22 passed**, 5 skipped; **27 passed** with `MCP_INTEGRATION_URL` |
+| `ruff check`, `mypy src` | clean, both packages |
+| `dotnet format --verify-no-changes` | clean |
+
+## HTTPS is off, and why the plan shows it
+
+The `alb` module is complete — 443 listener, TLS 1.3 policy, port 80 redirect, and
+either an existing `certificate_arn` or `domain_name` + `route53_zone_id` for
+Terraform to request and DNS-validate one. Both the listener and the redirect sit
+behind `count`, keyed on whether a certificate resolved, which is what lets the
+module plan cleanly on a fresh clone that owns no domain.
+
+The blocker is a domain, not the code: ACM public certificates require domain
+validation, and the account has no Route53 hosted zone and no certificate. So the
+plan contains one listener and the `tls_enabled` output is false.
+
+This is worth stating loudly because "ALB with HTTPS (ACM certificate)" is an
+explicit item on the brief's infrastructure-requirements list, and the dev plan is
+the artifact the brief asks to show. A reviewer reading that plan sees no
+certificate and no 443 listener. The configuration is there and the variables are
+documented; what is missing is an input only a domain owner can supply. Deliberately
+left off rather than faked — pointing `certificate_arn` at a fabricated ARN would
+make the plan *look* right, since plan does not verify the certificate exists, and
+would fail on apply.
+
 ## Known gaps and follow-ups
 
-- **Nothing has touched live AWS — not even a `plan`.** `validate` checks
-  syntax, references and types, but only a `plan` reaches the provider schema,
-  so wrong argument names or invalid enum values would still surface on first
-  use. Expect the usual first-apply friction too: ACM validation waits on DNS
+- **`terraform apply` has never run.** The plan resolves every value above, but no
+  resource has been created, so nothing is proven to come up or to reach anything
+  else. Expect the usual first-apply friction: ACM validation waits on DNS
   propagation, and the Ollama image comes from Docker Hub through NAT, so an
-  unauthenticated pull can hit rate limits. An ECR pull-through cache would fix
-  the latter properly.
+  unauthenticated pull can hit rate limits. An ECR pull-through cache would fix the
+  latter properly.
+- **S3 state and DynamoDB locking are unexercised**, per the backend note above.
 - **CI rebuilds images from scratch each run.** `docker compose build` is used
   instead of buildx bake because bake's target-derived image names do not match
   the `<project>-<service>` tags `compose up` expects, which would silently
   rebuild anyway. Restoring a cross-run layer cache via `COMPOSE_BAKE` is a
   clear follow-up.
+- **The reshaped integration job is unproven on a hosted runner.** It now builds
+  every image, including the 9.6 GB `atlas`, pulls an Ollama model and embeds 3,200
+  rows. A `Free disk space` step and a 60-minute timeout are in place, but the first
+  PR is the real test. If it does not fit, the honest fallback is dropping `atlas`
+  from that job while still building its image.
 - **`data.aws_elb_service_account` fails in regions opened after August 2022.**
   The bucket policy already grants the modern service principal too, but the
   data source itself would need removing to deploy in, say, `eu-central-2`.
@@ -318,7 +435,9 @@ What was actually run, not just written:
   need a Lambda plus a task restart to pick up the new value.
 - **Atlas is not deployed.** It is a local-only bonus and reads embeddings
   directly from Postgres.
-- **The API's Prometheus `/metrics` endpoint is unused on AWS**, where metrics
-  come from Container Insights and the ADOT sidecar. `monitoring/prometheus.yml`
-  still has a TODO for an `mcp-server` scrape target, which needs Part 3 to
-  expose one.
+- **The API's Prometheus `/metrics` endpoint is unused on AWS**, where metrics come
+  from Container Insights and the ADOT sidecar. `monitoring/prometheus.yml` scrapes
+  only the API: the MCP server exposes no `/metrics` endpoint, and MCP tool latency
+  is measured from the API side as `mcp_tool_call_duration` instead. See
+  [`section-3.md`](section-3.md#follow-ups-not-part-3) for what a server-side
+  endpoint would add.

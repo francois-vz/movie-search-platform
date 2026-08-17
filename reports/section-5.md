@@ -11,13 +11,18 @@ The plan this part was built from: [plans/part-5-atlas.plan.md](plans/part-5-atl
 
 ```bash
 docker compose up --build atlas
-# open http://localhost:7000
-# Color by Field → major_genre
+# open http://localhost:7000 — already coloured by major_genre
 ```
 
 `atlas` waits on `postgres` healthy and `migrate` completed, then **polls** until
-`movies.embedding IS NOT NULL` for at least one row. Until 1.4/1.5 land, the
-container stays up and logs that it is waiting — it does not invent a seed.
+`movies.embedding IS NOT NULL` for at least one row. If the pipeline has not loaded
+yet the container stays up and logs that it is waiting — it does not invent a seed.
+
+That polling has a side effect worth knowing: because `atlas` only reports healthy
+once embeddings exist, `docker compose up --wait` indirectly blocks on the pipeline
+finishing. Convenient, but not something to rely on — a *failed* pipeline then
+surfaces as an atlas health timeout rather than as the real error, which is why
+anything asserting on loaded data should `docker compose wait pipeline` explicitly.
 
 Re-export after a pipeline re-run: recreate the service so the entrypoint dumps
 Parquet again.
@@ -143,29 +148,48 @@ The patch reaches into a third-party seam, so it fails open: an unexpected props
 shape logs a warning and returns the original props, leaving stock behaviour and a
 working `:7000`.
 
+**What is on screen.** Twelve genres, led by Drama 789, Comedy 675 and Action 420,
+plus **275 points in a null category**. That last group is not a bug: 1.2 imputation
+deliberately leaves `major_genre` NULL rather than filling an `"Unknown"` sentinel,
+because it is a facet `list_genres` advertises and `genre_filter` matches on — so an
+invented genre would become a browsable category here and a selectable filter value
+that means nothing. Reasoning in
+[`section-1.md`](section-1.md#major_genre-is-deliberately-left-null).
+
 **How to read the map**
 
 - Tight single-colour blobs: that genre’s plots sit close in embedding space
   (Action vs Drama often separate).
 - Mixed colours in one neighbourhood: genre-ambiguous plots (e.g. action-comedy)
-  or titles whose augmented text is thin.
+  or titles whose augmented text is thin. Sparse rows really are shorter — 1.3
+  drops a template line rather than embedding an imputed value, so a thin row has
+  less to be similar *about*.
 - Isolated points: outliers — a title whose neighbours in vector space are not
   its billed genre. Worth checking against MCP `get_similar_movies`.
 
 ## Compose
 
 Single `atlas` service (brief’s table). Build context is the repo root so the
-image can copy `scripts/export_embeddings_atlas.py` and
-`database/queries/atlas_export.sql`. Healthcheck is HTTP `:7000`. Host bind is
-`0.0.0.0` (CLI default `localhost` would be unreachable from the host).
+image can copy `scripts/export_embeddings_atlas.py`,
+`database/queries/atlas_export.sql` and `scripts/atlas/atlas_color_by.py`.
+Healthcheck is HTTP `:7000`. Host bind is `0.0.0.0` (CLI default `localhost` would
+be unreachable from the host).
 
-No `depends_on: pipeline` yet: today the pipeline exits after 1.1 without
-writing vectors. After 1.5, the wait loop is enough; that edge can be added
-then.
+**No `depends_on: pipeline`, deliberately.** The obvious edge would be
+`service_completed_successfully`, and the wait loop makes it unnecessary — but
+worse than unnecessary, it would make `atlas` unstartable whenever the pipeline
+had failed or been skipped, which is exactly when someone might want to look at
+whatever embeddings already exist. Polling degrades better than a hard edge.
 
 ## Follow-ups (not Part 5)
 
-- **1.5 loader** must write `embedding` or Atlas never becomes healthy.
-- Optionally `depends_on: pipeline: service_completed_successfully` once 1.5
-  lands on `docker compose up`.
-- Part 6 does not need Atlas on ECS; this bonus is local Compose.
+- The colour patch depends on `embedding-atlas` internals (`make_embedding_atlas_props`
+  and the frontend's `defaultChartsConfig` merge). It fails open, so an upstream
+  change costs the colouring rather than the service, but a version bump is worth
+  a browser check. Pinning the `embedding-atlas` version in the image is the cheap
+  mitigation.
+- The image is ~9.6 GB, which dominates a cold `docker compose build` and is the
+  main reason CI may not fit the full stack on a hosted runner. Slimming it means
+  dropping UMAP's compiled dependencies, which is not worth doing for a bonus part.
+- Part 6 does not deploy Atlas to ECS: it is a local-only bonus that reads
+  embeddings straight from Postgres, and nothing in the brief asks for it in AWS.

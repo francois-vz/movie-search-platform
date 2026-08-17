@@ -12,6 +12,10 @@ platform runs locally via Docker Compose and deploys to AWS ECS Fargate via Terr
 The brief invites partial submissions provided the gaps are documented. This
 section is that documentation; every `⚠️` below is repeated in context in the
 section it affects, and collected in [§14](#14-known-limitations--future-improvements).
+Two indexes sit after it: [§15](#15-design-decisions--trade-offs) is every
+deliberate choice with the alternative it beat and what it costs, and
+[§16](#16-requirements-coverage) maps each requirement in the brief to where it is
+answered.
 
 | Part | Area | State |
 | ---- | ---- | ----- |
@@ -23,11 +27,12 @@ section it affects, and collected in [§14](#14-known-limitations--future-improv
 | 6 | Docker Compose, Terraform, CI/CD | Compose and CI/CD complete and verified; `terraform plan` clean against a real account, never applied ⚠️ |
 | — | Walkthrough video | Not recorded ⚠️ |
 
-**What is verified, by observation.** Full evidence log, including the five bugs
-the first end-to-end run exposed and why the test suites could not see them:
-[`reports/verification.md`](reports/verification.md). The platform has been
-brought up from an empty Docker state (`docker compose down -v` then
-`docker compose up --build`) and exercised the length of the chain:
+**What is verified, by observation.** The platform has been brought up from an
+empty Docker state (`docker compose down -v` then `docker compose up --build`) and
+exercised the length of the chain. Each part's report under `reports/` carries its
+own evidence, including the bugs the first end-to-end run exposed and why the test
+suites could not see them — indexed in
+[§16](#16-requirements-coverage).
 
 - All ten services reach healthy; `migrate` and `pipeline` exit 0.
 - Stages 1.4 and 1.5 run for real: 3,201 augmented texts embedded through the
@@ -55,7 +60,8 @@ brought up from an empty Docker state (`docker compose down -v` then
 - Atlas opens with points already coloured by `major_genre`, data table intact,
   confirmed in a browser against the shipped image.
 - `terraform plan` for dev against a real AWS account: **143 to add, 0 to change,
-  0 to destroy**, no errors or warnings. Nothing has been applied.
+  0 to destroy**, no errors or warnings — the Terraform artefact the brief asks to
+  see. Nothing has been applied.
 - p95 on search is **17ms** at the default 60/minute limit and **608µs** over
   4,795 requests at 80 req/s with the limit raised — against a 500ms target.
 - `ruff`, `mypy` and `pytest` are green: 66 passed in `pipeline` and 64 in
@@ -63,10 +69,14 @@ brought up from an empty Docker state (`docker compose down -v` then
   pgvector container (62 + 4 skipped and 58 + 6 skipped without one). CI now
   provides that container, so all ten database-backed tests run there too.
 
-**What is still not verified.** `terraform apply`. The dev plan is clean against a
-real account, which raises [§12](#12-terraform-deployment) well above a
-code-review claim — the plan resolves every data source and every value it
-asserts — but no resource has been created, so nothing is proven to *run* on AWS.
+**What is still not verified.** Anything that needs a live deployment. The dev plan
+is clean, which raises [§12](#12-terraform-deployment) well above a code-review
+claim — it resolves every data source and every value it asserts — but no resource
+has been created, so nothing is proven to *run* on AWS, and X-Ray has never been
+seen in X-Ray. Two consequences worth knowing before reading §12: the plan used a
+local backend, so S3 state and DynamoDB locking are unexercised, and the ALB plans
+a single port-80 listener because HTTPS needs a certificate and there is no domain
+to get one for.
 
 ---
 
@@ -102,7 +112,7 @@ asserts — but no resource has been created, so nothing is proven to *run* on A
 │  ┌─────────────────────────┐  │  Embedding Atlas (bonus)   │                 │
 │  │  mcp-server      :8000  │  │  Parquet export → UMAP     │                 │
 │  │  FastMCP over SSE       │  └────────────────────────────┘                 │
-│  │  5 semantic tools       │                                                 │
+│  │  6 MCP tools            │                                                 │
 │  └───────────┬─────────────┘                                                 │
 │              │ MCP over SSE (traceparent propagated)                         │
 │              ▼                                                               │
@@ -209,11 +219,30 @@ Run `./scripts/e2e_test.sh` afterwards to assert the whole chain.
 
 `migrate` (Flyway) and `pipeline` are run-to-completion jobs and expose no port.
 
+**Health checks and ordering.** Every long-lived service has a health check, and
+every `depends_on` names an explicit condition — `service_healthy` for the eight
+that hold a healthy state, `service_completed_successfully` for the two jobs that
+do not (a run-to-completion container is never "healthy", it exits). The probes
+are specific rather than a port ping: `embeddings` greps `ollama list` so it is
+healthy only once the model is resident, and Jaeger is probed on its admin port
+14269 because 16686 serves the UI. Three of them use busybox `wget --spider`,
+since those images ship no `curl`.
+
 ### Embedding Atlas (bonus)
 
 `http://localhost:7000` is Apple Embedding Atlas over the Part 2 `movies`
-vectors. The service polls until 1.5 has written embeddings, exports Parquet,
-then runs UMAP (cosine, seed 42). Decisions: [`reports/section-5.md`](reports/section-5.md).
+vectors. The service runs
+[`scripts/export_embeddings_atlas.py`](scripts/export_embeddings_atlas.py) — the
+path the brief specifies — which polls until 1.5 has written embeddings, dumps
+Parquet from `database/queries/atlas_export.sql`, and hands it to Atlas, which
+projects with UMAP (cosine, seed 42). Decisions:
+[`reports/section-5.md`](reports/section-5.md).
+
+The same script runs standalone against a populated database:
+
+```bash
+python scripts/export_embeddings_atlas.py --output atlas_export/movies.parquet
+```
 
 **Colour by genre:** already applied on load — no clicking. Atlas has no `--color`
 flag and the CLI serves its props verbatim, so `scripts/atlas/atlas_color_by.py`
@@ -232,7 +261,10 @@ are not their billed genre. Cross-check with MCP `get_similar_movies`.
 
 Five stages, each its own module under `pipeline/src/pipeline/`, chained by
 `pipeline/src/main.py`. Full narrative with per-decision rationale:
-[`reports/section-1.md`](reports/section-1.md).
+[`reports/section-1.md`](reports/section-1.md). The brief's README outline has no
+section of its own for Part 2, so the schema the pipeline writes into — including
+the Flyway justification and the documented hybrid query — is
+[the last subsection here](#vector-database-part-2).
 
 | Stage | Module | What it does |
 | ----- | ------ | ------------ |
@@ -316,14 +348,120 @@ HTTP to the `embeddings` container, in batches of 32 — roughly 80 seconds.
 no natural key). A second run reports the same 3,200 total, confirming the
 `ON CONFLICT (lower(title), release_year)` upsert is idempotent in practice.
 
-### Schema changes
+### Vector database (Part 2)
 
-Schema is applied by the Flyway `migrate` job. Flyway versions are forward-only,
-so after editing `database/migrations/` reset the local volume:
+PostgreSQL 16 with pgvector is both the structured store and the vector store —
+one table, no separate vector service. The schema is
+`database/migrations/V1__initial_schema.sql`, the indexes are `V2__indexes.sql`,
+and the Flyway `migrate` job applies both. Full reasoning:
+[`reports/section-2.md`](reports/section-2.md).
+
+`movies` extends the brief's minimum schema rather than restating it:
+
+| Group | Columns | Why |
+| ----- | ------- | --- |
+| Identity | `id UUID PRIMARY KEY` | Public identity for `GET /movies/{id}` and `get_similar_movies` |
+| Core metadata | `title`, `release_date`, `release_year`, `major_genre`, `mpaa_rating`, `director`, `distributor`, `creative_type`, `source` | Filters, natural-language queries, Atlas colour-by-genre. `title` is nullable for the one untitled row |
+| Numerics | `imdb_rating`, `imdb_votes`, `rt_rating`, `production_budget`, `us_gross`, `worldwide_gross`, `running_time_min` | Hybrid filters, `/stats`, the "small budget" and Rotten Tomatoes queries |
+| Derived (1.3) | `budget_tier`, `decade`, `rating_score_delta`, `blockbuster_flag` | The `decade` filter binds directly to a column; the rest feed Atlas facets |
+| Provenance (1.2) | `imdb_rating_imputed`, `rt_rating_imputed`, `production_budget_imputed`, `running_time_min_imputed` | Beyond the brief: search never has to treat a filled value as observed |
+| Search payload | `augmented_text`, `embedding vector(768)` | 768 matches `nomic-embed-text`; both stay nullable until the loader writes them |
+| Audit | `pipeline_version`, `created_at`, `updated_at` | The brief's three audit columns; a V1 trigger stamps `updated_at` on every update |
+
+`us_dvd_sales` is cleaned by 1.1 but not stored — too sparse to help search and
+absent from the text template.
+
+Uniqueness is a **partial** unique index, which is what makes the loader
+idempotent and keeps remakes:
+
+```sql
+CREATE UNIQUE INDEX uq_movies_title_year
+    ON movies (lower(title), release_year)
+    WHERE title IS NOT NULL AND release_year IS NOT NULL;
+```
+
+The loader's `ON CONFLICT` target restates that predicate exactly — otherwise
+Postgres cannot infer the index and every upsert silently becomes an insert.
+`pipeline/tests/test_loader.py` asserts the two agree.
+
+#### Flyway, not Alembic
+
+The brief allows either. Flyway, for three reasons:
+
+- The stack is polyglot. SQL-first DDL is the one language the Python pipeline,
+  the Python MCP server and the .NET API all share; Alembic would tie the
+  schema to a Python service that the API does not depend on.
+- pgvector types, HNSW operator classes and partial indexes read far more
+  clearly as raw SQL than as SQLAlchemy operations.
+- The same files apply locally and on RDS. `CREATE EXTENSION IF NOT EXISTS
+  vector` / `pg_trgm` are both RDS-safe for `rds_superuser`, so Part 6 needed no
+  separate migration path — only a way to *run* Flyway inside the VPC, which is
+  what `database/Dockerfile` is for.
+
+The cost is that Flyway versions are forward-only, so local schema edits mean
+resetting the volume:
 
 ```bash
 docker compose down -v && docker compose up --build
 ```
+
+There is no seed script, deliberately: the brief specifies that the seed **is**
+the pipeline (1.5 `loader.py`).
+
+#### Indexes (V2)
+
+| Index | Serves |
+| ----- | ------ |
+| HNSW `vector_cosine_ops` on `embedding`, partial `WHERE embedding IS NOT NULL` | Semantic kNN. Defaults for `m` / `ef_construction`; at 3,200 rows the planner may still sequential-scan, and the index is what makes growth cheap |
+| B-trees on `major_genre`, `decade`, `imdb_rating`, `mpaa_rating` | The four hybrid filters |
+| GIN trigram on `title` (`pg_trgm`) | `get_movie_by_title`'s fuzzy fallback |
+
+#### Hybrid query: vector similarity + metadata filters
+
+The documented query the brief asks for is
+[`database/queries/hybrid_search.sql`](database/queries/hybrid_search.sql) — not
+applied by Flyway, and the same text Part 3 executes (`test_sql_sync.py` fails if
+the copy baked into the MCP image drifts):
+
+```sql
+SELECT id, title, release_year, major_genre, mpaa_rating, director, distributor,
+       imdb_rating, rt_rating,
+       1 - (embedding <=> $1::vector) AS similarity,
+       'semantic'::text AS match_type
+FROM movies
+WHERE embedding IS NOT NULL
+  AND ($2::text    IS NULL OR major_genre = $2)
+  AND ($3::int     IS NULL OR decade      = $3)
+  AND ($4::numeric IS NULL OR imdb_rating >= $4)
+  AND ($5::text    IS NULL OR mpaa_rating = $5)
+ORDER BY embedding <=> $1::vector
+LIMIT $6;
+```
+
+Every filter is `NULL`-guarded, so one prepared statement covers all sixteen
+filter combinations instead of assembling SQL per request. `<=>` is cosine
+*distance*, which is what the HNSW `vector_cosine_ops` index is built for;
+similarity is reported as `1 - distance` so callers see a higher-is-better score
+in `[0, 1]`, tagged `match_type = 'semantic'` so it is never confused with the
+trigram score a fuzzy title match returns on the same field.
+
+*"action movies from the 90s with high IMDB ratings"* binds `$1` to the
+`search_query:`-prefixed embedding, `$2 = 'Action'`, `$3 = 1990`, `$4 = 7.5`,
+`$5 = NULL`, `$6 = 10`. Run it by hand:
+
+```bash
+docker compose exec postgres psql -U movies -d movies -c \
+  "SELECT title, release_year, major_genre, imdb_rating
+   FROM movies
+   WHERE embedding IS NOT NULL AND major_genre = 'Action' AND decade = 1990
+     AND imdb_rating >= 7.5
+   ORDER BY embedding <=> (SELECT embedding FROM movies WHERE title = 'The Matrix')
+   LIMIT 5;"
+```
+
+That substitutes a stored vector for a live query embedding, which is the one
+part of the path `psql` cannot do on its own. `mcp-server/tests/test_sql_execution.py`
+executes the real query against pgvector with `MCP_TEST_DSN` set.
 
 ## 6. Data Decisions
 
@@ -500,6 +638,39 @@ direct `lookup`. Without `match_type`, a 0.42 is unreadable.
 Arguments are validated by Pydantic v2 models (`mcp-server/src/server/models.py`);
 `top_k` is clamped to `MCP_TOP_K_MAX` rather than rejected.
 
+### Server requirements (3.2)
+
+| Requirement | How |
+| ----------- | --- |
+| Transport: SSE locally, configurable for production | `MCP_TRANSPORT`, default `sse`. `stdio`, `http` and `streamable-http` are supported with no code change |
+| Pydantic v2 models for all inputs and outputs | `SearchMoviesInput`, `TitleLookupInput`, `MovieIdInput`, `SimilarMoviesInput`; `MovieResult` and `DatasetStats` out. `extra="forbid"`, so a typo'd filter is an error, not a dropped constraint |
+| Connection pooling with asyncpg | `DB_POOL_MIN_SIZE` / `DB_POOL_MAX_SIZE`, with `pgvector.asyncpg.register_vector` on connect so a `vector(768)` round-trips as a list |
+| Health check at `GET /health` | 200 after `SELECT 1`, else 503. The Compose healthcheck uses the same path |
+| Structured JSON logging with request tracing | structlog, one line per tool call with `tool`, `duration_ms`, `status` and `trace_id`. `_tool_span` resolves the id itself, because under SSE the tool body runs in the stream's task rather than the POST that delivered it |
+| Environment-based configuration, no hardcoded values | `mcp-server/src/config.py`. Policy values are env vars too: `HIGH_IMDB_THRESHOLD`, `MCP_TOP_K_MAX`, `EMBEDDING_TIMEOUT_SECONDS` |
+
+### The five example queries (3.3)
+
+All five return relevant results through the API, asserted by
+`scripts/e2e_test.sh`. Filters are extracted from the query text when the caller
+omits them, and an explicit argument always wins. What the SQL constrains and
+what rides on the embedding is a deliberate split:
+
+| Query | Becomes a SQL filter | Carried by the embedding |
+| ----- | -------------------- | ------------------------ |
+| action movies from the 90s with high IMDB ratings | `Action`, `decade=1990`, `imdb ≥ 7.5` | — |
+| critically acclaimed drama films with small budgets | `Drama`, `imdb ≥ 7.5` | small budgets |
+| animated family movies distributed by Disney | — | animated, family, Disney |
+| sci-fi films directed by James Cameron | — | sci-fi, James Cameron |
+| dark psychological thrillers with low Rotten Tomatoes scores | `Thriller/Suspense` | dark, psychological, low RT |
+
+Director, distributor, budget and Rotten Tomatoes are not in the tool signature,
+and `sci-fi`, `animated` and `family` are not Vega `major_genre` values —
+`sci-fi` is a Creative Type. They retrieve because 1.3 wrote them into
+`augmented_text`, which means those constraints are soft: a James Cameron query
+can return a near miss. Making them hard filters would mean extending the tool
+signature past what the brief specifies.
+
 ```bash
 # readiness (Compose healthcheck uses the same path)
 curl -s http://localhost:8000/health
@@ -534,8 +705,31 @@ MCP_TEST_DSN=postgresql://movies:change_me_local_only@localhost:5432/movies pyte
 
 ## 9. API Documentation
 
-The public API is **.NET 10 Minimal APIs** (not controllers): seven routes, first-class
-OpenAPI 3.1, and little ceremony for a BFF that only orchestrates MCP tools.
+The public API is **.NET 10 Minimal APIs** (not controllers): seven routes,
+first-class OpenAPI 3.1, and little ceremony for a BFF that only orchestrates MCP
+tools. Controllers would add MVC conventions, attribute routing and filter
+pipelines to a surface that has one shape — read a query, call a tool, map a DTO
+— so the cost of the choice is that those extension points are not there if the
+surface later grows.
+
+Four projects plus tests, as the brief's 4.3 layout specifies:
+
+```
+api/
+├── MovieSearch.sln
+├── src/MovieSearch.Api/              entry point, JWT, RBAC policies, OpenAPI,
+│                                     rate limiting, timeouts, OpenTelemetry
+├── src/MovieSearch.Application/      use cases + the cache-aside decorator
+├── src/MovieSearch.Domain/           Movie, DatasetStats, SearchQuery,
+│                                     IMovieSearchClient (no dependencies)
+├── src/MovieSearch.Infrastructure/   McpMovieSearchClient (SSE), FakeMovieSearchClient
+└── tests/MovieSearch.Tests/          unit + WebApplicationFactory integration tests
+```
+
+Dependencies point inwards: `Domain` references nothing, and both
+`Application` and `Infrastructure` depend on its `IMovieSearchClient` rather than
+on each other. That is what lets `MCP_CLIENT=fake` swap the entire data source at
+the DI boundary.
 
 Frozen spec: [`openapi.json`](openapi.json) (repo root) and live at
 `http://localhost:8080/openapi/v1.json`. Swagger UI: `http://localhost:8080/swagger`.
@@ -580,6 +774,69 @@ curl -s http://localhost:8080/api/v1/stats -H "Authorization: Bearer $ADMIN"
 Search query parameters: `q` (required), `top_k` (default 10, max 50), `genre`,
 `min_imdb_rating`, `mpaa_rating`, `decade`.
 
+### Example responses
+
+`POST /auth/token` → `200`:
+
+```json
+{ "access_token": "eyJhbGciOiJIUzI1NiIs…", "token_type": "Bearer", "expires_in": 3600, "role": "reader" }
+```
+
+`GET /api/v1/movies/search?q=action+movies+from+the+90s` → `200`, ranked by
+cosine similarity, descending. `GET /api/v1/movies/{id}` and `/similar` return
+the same object and the same array respectively:
+
+```json
+[
+  {
+    "id": "11111111-1111-1111-1111-111111111111",
+    "title": "The Matrix",
+    "releaseYear": 1999,
+    "majorGenre": "Action",
+    "mpaaRating": "R",
+    "director": "Lana Wachowski",
+    "distributor": "Warner Bros.",
+    "imdbRating": 8.7,
+    "rtRating": 87,
+    "similarity": 0.91
+  }
+]
+```
+
+`GET /api/v1/movies/genres` → `200`, a flat array of the distinct non-null
+genres: `["Action", "Adventure", "Comedy", …]`.
+
+`GET /api/v1/stats` → `200`:
+
+```json
+{ "totalMovies": 3200, "genres": 12, "yearMin": 1915, "yearMax": 2011, "avgImdbRating": 6.4 }
+```
+
+`GET /health` → `200` unconditionally (liveness, so Compose does not bounce the
+process); `GET /health/ready` returns the same shape with `503` when the real MCP
+client is configured and unreachable:
+
+```json
+{ "status": "healthy", "checks": { "mcp": "deferred" } }
+```
+
+Errors return an RFC 9457 `ProblemDetails` body — `400` for a blank `q`, `401`
+without a token, `403` for a reader on an admin route, `429` past the rate limit
+— with the exception of `404` for an unknown movie id, which has no body. All of
+them are declared in the served OpenAPI document, and every model, parameter and
+200 response carries an example, which is what pre-fills Swagger UI's "Try it
+out".
+
+### Performance and limits (4.5)
+
+| Requirement | Setting | Observed |
+| ----------- | ------- | -------- |
+| Response caching for repeated identical queries, configurable TTL | `IMemoryCache` around every MCP call, `CACHE_TTL_SECONDS` (default 60) | Cache hits assert in `ApiTests`; the decorator is `CachingMovieSearchClient` |
+| Rate limiting, 60 requests/minute per authenticated user | `RATE_LIMIT_PER_MINUTE`, partitioned on the JWT `sub` | 57 × 200 and 8 × 429 over 65 rapid calls |
+| Request timeout, configurable, default 30s | `REQUEST_TIMEOUT_SECONDS` | — |
+| All endpoints under 500ms at p95 | — | **17ms** p95 on search at the default limit; **608µs** over 4,795 requests at 80 req/s with the limit raised |
+| k6 load test against the search endpoint | `scripts/load_test.js`, arrival rate derived from the configured limit | `k6 run scripts/load_test.js` — see [§13](#13-running-tests) |
+
 API-only iteration (no MCP/Postgres): `MCP_CLIENT=fake docker compose run --no-deps --service-ports api`
 
 The generated spec carries schemas, the Bearer scheme and examples on every
@@ -609,7 +866,7 @@ reader on an admin route → 403. Signing key / issuer / audience come from
 
 | Signal | Where |
 | ------ | ----- |
-| Logs | JSON on the API container stdout (Serilog `RenderedCompactJsonFormatter`); rolling files at `/app/logs/api-*.log`. The MCP server logs structured JSON via structlog. The pipeline logs plain text to stdout and `reports/pipeline.log`. |
+| Logs | JSON on the API container stdout (Serilog `RenderedCompactJsonFormatter`); rolling files at `/app/logs/api-*.log`. Both carry `@tr` and `@sp`, compact JSON's trace and span ids, so a line joins to its Jaeger span. The MCP server logs structured JSON via structlog with the same id as `trace_id`. The pipeline logs plain text to stdout and `reports/pipeline.log`. |
 | Traces | Jaeger UI `http://localhost:16686` (OTLP gRPC `jaeger:4317`). The MCP server reads `traceparent` off inbound HTTP; the .NET side propagates it through `HttpClientInstrumentation`. Verified: one trace spans `GET /api/v1/movies/search` → `mcp.search_movies_by_description` → the MCP server, whose JSON logs carry the same `trace_id`. |
 | Metrics | Prometheus `http://localhost:9090` scrapes `api:8080/metrics`. Grafana `http://localhost:3000` (admin/admin from `.env`) loads the **Movie Search** dashboard: request rate, latency p50/p95/p99, 5xx rate, MCP tool latency, active connections. |
 
@@ -632,7 +889,8 @@ only understands `traceparent` — still joins the same trace.
 Verified locally with the flag forced on: an inbound
 `X-Amzn-Trace-Id: Root=1-5759e988-bd862e3fe1be46a994272793` produced spans on
 trace `5759e988bd862e3fe1be46a994272793`, and generated ids carried the request
-timestamp in their prefix. ⚠️ Never observed in X-Ray itself — no AWS account.
+timestamp in their prefix. ⚠️ Never observed in X-Ray itself, because nothing is
+deployed — the ADOT-sidecar-to-X-Ray hop is the untested part.
 
 ## 12. Terraform Deployment
 
@@ -785,24 +1043,39 @@ Every requirement in §6.2 of the brief is implemented:
 ⚠️ `terraform fmt -check` and `validate` pass on all four roots, and a dev
 `terraform plan` against a real account is clean — 143 to add, 0 to change, 0 to
 destroy, no warnings — which is where the resolved values above come from rather
-than from reading HCL. The exception is the HTTPS row: with no certificate the
-plan plans a single port-80 listener, exactly as described above. **Never
-applied**, so there is no cost figure and no confirmation that the ECS task
-definitions start cleanly. Evidence:
-[`reports/verification.md`](reports/verification.md#terraform-against-a-real-aws-account).
+than from reading HCL. **Never applied**, so there is no cost figure and no
+confirmation that the ECS task definitions start cleanly. Evidence, including the
+table of requirements read off the plan:
+[`reports/section-6.md`](reports/section-6.md#terraform).
+
+**Why that plan shows no HTTPS listener.** Reading the plan, the ALB has exactly
+one listener — HTTP on port 80 — which looks like the HTTPS row above is unmet. It
+is not a missing feature but a missing input. TLS is not a boolean: the module
+turns it on when a certificate becomes available, either `certificate_arn` for one
+that already exists or `domain_name` plus `route53_zone_id`, in which case
+Terraform requests an ACM certificate and validates it by DNS. ACM public
+certificates require domain validation, so a certificate cannot exist without a
+domain, and this account has no hosted zone — hence no certificate, hence the
+`:443` listener and the `:80` redirect are both `count = 0` and never reach the
+plan. Supply either input and all three appear, along with an alias record.
+Deliberate, documented in [§14](#14-known-limitations--future-improvements), and
+the one requirement above that the plan cannot corroborate on its own.
 
 ### CI/CD
 
 **`ci.yml`** runs on every pull request to `main`, in four parallel jobs:
 
 - **Python** — `ruff check`, `mypy` on both `pipeline` and `mcp-server`, then
-  `pytest` on each.
+  `pytest` on each against a `pgvector/pgvector:pg16` service container, plus two
+  steps that fail if the database-backed modules skipped.
 - **.NET** — `dotnet format --verify-no-changes`, then `dotnet test` in Release.
-- **Docker** — builds every image with `docker buildx bake` (GitHub Actions
-  layer cache), brings the stack up with `docker compose up -d --wait api`, and
-  runs `scripts/smoke_test.sh` against it. The `pipeline` and `atlas` data jobs
-  are excluded: both embed the full dataset, which would dominate CI runtime
-  without testing anything the smoke test does not already cover.
+- **Docker** — builds every image (including `database/Dockerfile`, which Compose
+  never builds because it bind-mounts the SQL instead), starts the whole platform
+  with `docker compose up -d --wait`, blocks on `docker compose wait pipeline`,
+  then runs `scripts/smoke_test.sh`, `scripts/e2e_test.sh` and the live-MCP .NET
+  tests against it. Starting everything rather than just `api` and its dependency
+  closure is what makes CI exercise the embed-and-load path and the real SSE
+  client; the cost is a slow job that has to free disk space first.
 - **Terraform** — `fmt -check -recursive`, then `init -backend=false` and
   `validate` on all four roots so validation needs no AWS credentials. A real
   `plan` runs only when the OIDC role variable is configured, so forks still get
@@ -892,16 +1165,18 @@ dropping the coverage.
 
 **Verification gaps** (the honest list, expanded in [§0](#0-status)):
 
-- **`terraform apply` has never run.** The dev plan is clean (143 to add, no
-  errors, no warnings) against a real account, and it confirms the resolved
-  values §12 claims — RDS private and encrypted, flow logs on all traffic, CPU
-  and memory autoscaling on every service. What a plan cannot prove is that the
-  resources come up and talk to each other. This is the one remaining gap of
-  consequence.
+- **Nothing has been applied to AWS.** The dev plan is clean — 143 to add, no
+  errors, no warnings, against a real account — and it confirms the resolved values
+  §12 claims: RDS private and encrypted, flow logs on all traffic, CPU and memory
+  autoscaling on every service. What no plan can prove is that the resources come
+  up and talk to each other, which is the honest limit of the evidence here. It is
+  a deliberate stopping point rather than unfinished work: the plan is the Terraform
+  result this build set out to produce.
 - The plan ran with the S3 backend temporarily overridden to a local one, because
   `terraform/bootstrap` has not been applied, so the state bucket and DynamoDB
   lock table do not exist yet. The backend and locking configuration is therefore
-  still unexercised.
+  still unexercised — the one part of §12 that a plan could have covered and did
+  not.
 - CI's `terraform plan` step needs the OIDC role, so on a fork it is skipped. It
   now emits a warning annotation and a run-summary note rather than passing
   quietly as though all three checks ran.
@@ -978,3 +1253,196 @@ because no run had ever exercised the full chain):
   is fixed by the brief.
 - HNSW is indexed but the planner will likely sequential-scan at 3.2k rows. The
   index matters only if the corpus grows.
+
+## 15. Design Decisions & Trade-offs
+
+Every row below is a choice that had a credible alternative. The second column is
+what was rejected, the third is what the choice costs — because a decision
+documented without its cost is only half documented. Per-part narrative lives in
+`reports/section-1.md` … `section-6.md`; this is the consolidated register.
+Verification gaps are a different thing and stay in [§14](#14-known-limitations--future-improvements).
+
+One principle decides most of Part 1 and half of Part 2: **flag rather than
+silently mutate, and never render a value the data does not support.** Cleaning
+fixes structure and unambiguous errors; anything uncertain is nulled, counted and
+left to imputation; imputation fills columns but never the embedding input. The
+cost is a corpus with visible holes rather than a tidy one, which is the trade
+this system is built around.
+
+### Part 1 — Data pipeline
+
+| Decision | Instead of | Trade-off accepted |
+| -------- | ---------- | ------------------ |
+| De-duplicate on `(normalized title, release_year)` | Title alone, or a surrogate key | The key must stay identical to the loader's `ON CONFLICT` target; change one and idempotency silently breaks in the other. Remakes survive, which title alone would not allow. |
+| Keep the most complete row of a duplicate group, tie-broken on `imdb_votes` | First-wins or last-wins | Deterministic only while the input order is stable. |
+| Null numerics outside a sensible range | Clamp to the boundary | More missingness for 1.2 to fill, in exchange for never storing a fabricated measurement that is indistinguishable from a real one. |
+| Treat `0` box office as missing | Accept it as a real $0 | A genuinely zero-gross film would be recorded as unknown. In this file `0` is how unknown box office was encoded, and no such film exists. |
+| Century-correct any year above 2011 | A `year > current_year` rule | A dataset-specific constant that must be revisited if the Vega file is replaced. The general-looking rule would have missed 22 pre-1950 titles, including *Ben-Hur* stored as 2025. |
+| Leave capitalisation alone | `str.title()` on categoricals | Depends on the source already being consistent. Blind title-casing corrupts `20th Century Fox` and `Based on Book/Short Story`. |
+| `"Unknown"` sentinel for descriptive categoricals | Mode imputation | The sentinel does reach API responses. Mode would attribute 1,331 films to one director — and "sci-fi films directed by James Cameron" is one of the brief's own queries. |
+| Group median with a 10-observation floor: genre for ratings and runtime, decade for budget | `genre × decade` | A coarser conditioner than it looks like it should be. `genre × decade` was measured first: 28 of its 75 cells hold fewer than 5 rows, so its medians are noise. |
+| `major_genre` stays NULL | `"Unknown"`, like the other categoricals | 275 rows are invisible to `list_genres` and the genre filter. Better than a browsable category and a selectable filter value that mean nothing. |
+| Per-cell `<column>_imputed` provenance | Store values only | Four extra `NOT NULL` columns the loader must bind every time — it broke on exactly this once. Downstream can tell an observed 6.4 from a filled one. |
+| Omit a template line when its value was not observed | Render the imputed value, or `Runtime: Unknown` | Rows carry unequal signal. The sentinel would have been actively worse: identical across every affected row, it pulls unrelated films together in vector space purely because they share a gap. |
+| Fixed industry budget thresholds | Sample quartiles | Nominal dollars, so older films skew indie. In exchange "$15M indie" keeps its meaning if the corpus is refreshed. |
+| Derived features NULL unless every input was observed | Compute them from filled values | Coverage gaps in Atlas facets and API responses (`rating_score_delta` on 2,260 of 3,201) instead of guesses that look measured. |
+| A batch that fails validation raises | Yield short vectors and carry on | One bad batch fails the whole run. A quietly incomplete corpus is far harder to notice, and the loader is idempotent so a re-run is cheap. |
+| Skip and count the one row with no natural key | Synthesise `"(untitled 2006-11-03)"`, or drop it silently | One row of 3,201 is unsearchable. The alternative serves a fabricated title to clients through `MovieResult.title` as though it were real. |
+
+### Part 2 — Vector database
+
+| Decision | Instead of | Trade-off accepted |
+| -------- | ---------- | ------------------ |
+| Flyway | Alembic | Forward-only, so local schema edits need `docker compose down -v`, and there is no Python-native autogenerate. Bought: SQL-first DDL in a polyglot stack, raw pgvector and HNSW syntax, and the same files applying to RDS. |
+| Partial unique index on `(lower(title), release_year)` | A materialized `natural_key` column | The upsert has to restate the index predicate exactly, or Postgres cannot infer it and the upsert silently becomes an insert. `pipeline/tests/test_loader.py` pins the two together. |
+| `title` nullable | `NOT NULL` | The schema accepts a row the loader then refuses, and MCP maps the NULL to `""`. The hole stays explicit in the schema rather than being hidden by a rejection. |
+| Partial HNSW `WHERE embedding IS NOT NULL` | A full index | Queries must carry the same predicate for the planner to use the index — `hybrid_search.sql` does. Unembedded rows never bloat it. |
+| Default `m` / `ef_construction` | Tuned HNSW parameters | Nothing is tuned for scale that does not exist. At 3,200 rows the planner will likely sequential-scan anyway. |
+| Omit `us_dvd_sales` | Store it | Not filterable or searchable. It is too sparse to help ranking and is not in the brief's text template. |
+| Hybrid query as a documented `.sql` file | A view or a SQL function | Two copies exist — the canonical one and the one baked into the MCP image — so `test_sql_sync.py` has to fail when they drift. In exchange the query is reviewable, and the same text is used by Part 3 and pinned by tests. |
+| Return `1 - (embedding <=> $1)` as `similarity` | Return raw cosine distance | One extra arithmetic step, and a number that only means cosine when `match_type` says `semantic`. Callers get higher-is-better in `[0, 1]`. |
+
+### Part 3 — MCP server
+
+| Decision | Instead of | Trade-off accepted |
+| -------- | ---------- | ------------------ |
+| A sixth tool, `get_movie_by_id` | Serving `GET /api/v1/movies/{id}` from `get_movie_by_title` | Departs from the brief's five-tool list. Without it that endpoint had nothing to call and failed against the real server while passing its own tests. |
+| Flat named parameters validated by Pydantic input models | One nested model argument, the more literal reading of "Pydantic v2 models for all inputs" | Less literal. A nested argument changes every call to `{"input": {…}}` and breaks the .NET client for no gain; validation and constraints still live in the models. |
+| `top_k` clamped to `MCP_TOP_K_MAX` | Rejecting out-of-range values | A caller asking for 1,000 gets 50 and is not told. Friendlier for an LLM caller that cannot reliably read the schema's bounds. |
+| `extra="forbid"` on inputs | Ignoring unknown arguments | A typo'd argument name is an error instead of a silently dropped filter. |
+| Every row carries `match_type` | `similarity` on its own | An extra field clients have to read. Without it, cosine similarity, trigram similarity, `1.0` for exact and `NULL` for a lookup are four incomparable meanings on one number. |
+| An exact title hit scores `1.0` | `NULL` | `1.0` is not a measured similarity, but a perfect match now outranks a fuzzy one instead of sorting last. |
+| Only genre, decade, min IMDB and MPAA become SQL filters | Also parsing director, distributor, budget and Rotten Tomatoes out of the query | Those constraints stay soft: they ride on the embedding, so "directed by James Cameron" can return near misses. They are not Vega `major_genre` values and not in the tool signature. |
+| Empty corpus or unknown id returns `[]` / `None` | Raising | A misconfigured deployment looks like an empty dataset rather than an error. |
+| `_tool_span` resolves `trace_id` itself | Relying on the HTTP middleware's contextvar | A little duplicated work per call. Necessary: under SSE the tool body runs in the stream's task, not the POST that delivered the message, and under `stdio` there is no HTTP request at all. |
+| The embedding client is duplicated, not shared with the pipeline | A shared package | Two copies to keep in step, in exchange for two independent images with no shared build context. |
+| `HIGH_IMDB_THRESHOLD`, `MCP_TOP_K_MAX` and `EMBEDDING_TIMEOUT_SECONDS` are env vars; `TOP_K_MIN` and the default `top_k` of 10 are not | Everything configurable, or nothing | A larger config surface for the three that are policy. One of the two left in code is a structural invariant, the other is fixed by the brief. |
+
+### Part 4 — .NET API
+
+| Decision | Instead of | Trade-off accepted |
+| -------- | ---------- | ------------------ |
+| Minimal APIs | Controllers | Seven routes over a thin BFF, and OpenAPI 3.1 is first-class in .NET 10. Controllers would add MVC conventions, filters and attribute routing for ceremony this surface does not need; the cost is that MVC-shaped extension points are not there if the surface grows. |
+| The API never touches Postgres | Reading pgvector directly for simple lookups | An extra network hop, and MCP's availability becomes the API's. In exchange there is exactly one place where SQL lives, and MCP is the single query surface for every client. |
+| `reader` may call only search | `reader` as "everything except stats" | Stricter than the brief asks. A richer catalog UI would need a broader reader role. |
+| `IMemoryCache` | Redis or another distributed cache | The cache is per instance, so the hit rate falls as ECS scales out. No extra service to operate for a 60-second TTL over an idempotent read. |
+| Rate limit partitioned on the JWT `sub` | Per IP, or global | Every caller sharing a client id shares the 60/minute budget. It also invalidated the k6 script until that derived its arrival rate from the configured limit. |
+| `MCP_CLIENT=fake` for tests and local work | Always talking to a real MCP server | The default test path never exercises the SSE client, which is how the FastMCP envelope bug shipped. Now closed from both sides by `LiveMcpTests` and `test_dotnet_contract.py`. |
+| `openapi.json` generated from the served document and asserted in CI | Maintaining it by hand | Every contract change needs `scripts/export_openapi.sh` re-run. Drift fails the build instead of accumulating. |
+| The Compose healthcheck probes `/health`, not `/health/ready` | Probing readiness | The container reports healthy before MCP is reachable. Deliberate: `/health` is unconditionally 200 so Compose does not restart the API while it waits, and `depends_on` already enforces ordering. |
+| `AWS_XRAY_ENABLED` switches the id generator and prepends `AWSXRayPropagator` to a composite | One exporter and one propagator for both environments | Two code paths, only one exercised locally. X-Ray rejects W3C-random trace ids, so the generator has to change too; keeping `tracecontext` in the composite is what lets the MCP server still join the trace. |
+
+### Part 5 — Embedding Atlas (bonus)
+
+| Decision | Instead of | Trade-off accepted |
+| -------- | ---------- | ------------------ |
+| Parquet export, with Atlas computing UMAP at startup (cosine, seed 42) | Precomputing and storing projections | ~3,200 points project in seconds on every container start; a materially larger corpus would need precompute. The fixed seed keeps the map stable across restarts, and cosine matches the HNSW space. |
+| Patch `defaultChartsConfig.embedding.data.category` in-process | `initialState.charts`, a static export, or forking the CLI | Leans on third-party internals that a minor release could move, so it fails open to stock Atlas. `initialState.charts` suppresses the default charts entirely and would have cost the data table. |
+| Restate the whole channel set in the patch | Passing `category` alone | Config that looks redundant. The frontend merge is shallow, so `{data: {category: …}}` replaces `data` wholesale and loses x, y and the tooltip columns. |
+| Atlas polls for embeddings | `depends_on: pipeline: service_completed_successfully` | Ordering is not declared in Compose. A failed pipeline leaves Atlas up and logging what it is waiting for, rather than never starting. |
+| Atlas is a reader only | Letting it seed or cache its own copy | Re-export needs `--force-recreate`. The 1.5 loader stays the only writer to `movies`. |
+
+### Part 6 — Infrastructure and DevOps
+
+| Decision | Instead of | Trade-off accepted |
+| -------- | ---------- | ------------------ |
+| ECS Fargate | EKS | No daemonsets, colder starts, and a compute module that is AWS-specific. Buys no control-plane cost, no node patching or cluster autoscaler, and task-level IAM without IRSA — for three long-lived services and two run-to-completion tasks. |
+| `terraform/` is a composition module; the roots are `environments/{dev,prod}` | One root using workspaces | Two roots to keep in step, and `terraform/` alone cannot be applied. A single root cannot hold two backends and two provider configurations. |
+| Dev is cost-shaped but structurally identical to prod | A minimal dev that omits components | One NAT gateway is a zonal single point of failure in dev, saving roughly $32/month per AZ. In exchange a dev plan is a genuine rehearsal for prod. |
+| Four interface VPC endpoints plus an S3 gateway endpoint | Routing ECR, Logs and Secrets traffic through NAT | About $7/month each, repaid in NAT data processing once images are pulled regularly, and those calls never traverse the public internet. |
+| Immutable ECR tags, git SHA, never `latest` | Mutable `latest` | A rollback needs the SHA. In exchange a tag names exactly one image forever. |
+| `modules/rds` owns the database credential; `modules/secrets` owns the rest | One secrets module | Secrets live in two modules. Assembling `DATABASE_URL` needs the RDS endpoint, so one module would have created a secrets → rds → secrets cycle. |
+| Every secret generated by `random_password` | Passing them in as variables | Rotation is manual and the values land in Terraform state, which is why the bucket is encrypted, versioned and private. No credential appears in a tfvars file, a CI variable or the repository. |
+| A separate execution role and one task role per service | One shared role | More roles to manage. The execution role's secret access belongs to the ECS agent, so application code can never read a secret it was not injected with. |
+| The GitHub deploy role carries `PowerUserAccess` plus IAM scoped to `movie-search-*` | Enumerating every resource type Terraform touches | The honest exception, mitigated by an OIDC trust policy pinned to one repository and to `main` or the dev/prod environments. Exhaustive policies of this kind tend to fail closed at the worst moment. |
+| `wait_for_steady_state = false` | Blocking on steady state | An apply can succeed before the service is actually serving. On a first apply no image exists yet, and blocking turns a legible "cannot pull image" event into a fifteen-minute timeout; the deployment circuit breaker with rollback catches real bad deploys. |
+| `desired_count` in `ignore_changes` | Managing it in Terraform | Terraform no longer reports drift on replica count, and stops fighting the autoscaler. |
+| Alarm thresholds above the autoscaling targets | Alarming at the target | Scaling reacts first, so an alarm means scaling has already failed rather than that load arrived. |
+| Ollama's model cached on EFS, 2 vCPU / 4 GiB, low scaling ceiling | Re-pulling the model per task | EFS adds cost and a slower cold read. Without it every task replacement re-downloads the model, turning a rolling deploy into minutes of unavailability; scaling this service out multiplies memory rather than throughput. |
+| CloudWatch and X-Ray on AWS | Running Prometheus, Grafana and Jaeger on Fargate | Two observability stacks to know, and the API's `/metrics` endpoint goes unused on AWS. The alternative is three more services to operate for no signal the brief asks for. |
+| Migrations run as an ECS `run-task` wrapped by `scripts/run_ecs_task.sh` | A Terraform resource, or a bare `aws ecs run-task` | A deploy-time script rather than declarative state. `run-task` is fire-and-forget, so a migration that exits 1 otherwise looks like a successful API call. |
+| Prod promotes the image manifests dev validated | Rebuilding from the same commit | Needs `scripts/promote_images.sh`. Rebuilding is not the same guarantee, because base images move underneath a tag. |
+| A `-target` apply creates ECR first | A single apply | A non-idiomatic step, and a no-op on every later run. It breaks the cycle where the push needs repositories the main apply has not created and the services need the images. |
+| `dynamodb_table` and `use_lockfile` both set | One or the other | Transitional duplication. The brief requires DynamoDB locking and Terraform 1.11+ deprecates it in favour of S3 lockfiles; this is HashiCorp's documented migration path and locks either way. |
+| CI's Compose job starts the whole platform and waits for the pipeline | Starting `api` and its dependency closure only | A slower job under real disk pressure — the atlas image alone is ~9.6 GB. It is the only place the embed-and-load path and the real SSE client are exercised. |
+| `ruff check` and `mypy --strict src` gate CI; `ruff format --check` and mypy over tests do not | Adding both | Eight files across Parts 1–5 are not formatter-clean, and that is a live follow-up. Test fixtures and monkeypatching trip strict mode without saying anything about the artifacts that ship. |
+| HTTPS stays off | Registering a domain so ACM can validate a certificate | Bearer tokens would cross the ALB in plaintext, which is a reason not to deploy it as it stands rather than an accepted risk — nothing is deployed. The module is complete and switches on with a certificate; see [§12](#12-terraform-deployment) and [§14](#14-known-limitations--future-improvements). |
+
+### Library choices
+
+The brief allows any additional libraries as long as the choices are documented.
+Everything here is open-source and pinned in `pyproject.toml`, `*.csproj` or
+`docker-compose.yml`.
+
+| Where | Library | Why this one |
+| ----- | ------- | ------------ |
+| Pipeline | `pandas` + `numpy` | The transforms in 1.1–1.3 are column-wise operations over 3,201 rows; a dataframe is the shortest path and `pandas-stubs` keeps them type-checked. |
+| Pipeline | `tenacity` | Declarative exponential backoff around the embedding HTTP calls, instead of a hand-rolled retry loop. |
+| Pipeline | `pyarrow` | Parquet writer for the Atlas export — the compact format for 768-float lists. |
+| Pipeline | `vega-datasets` | The dataset source the brief names. It fetches over the network at runtime, which is why the container needs egress. |
+| Both Python services | `pydantic` + `pydantic-settings` | Typed models for tool inputs, outputs and stage reports, and environment-based configuration with validation rather than `os.environ` reads. |
+| Both Python services | `httpx` | One async HTTP client for Ollama, with timeouts as first-class configuration. |
+| Both Python services | `structlog` | JSON logs with `merge_contextvars`, which is what carries `trace_id` onto every line. |
+| Both Python services | `asyncpg` + `pgvector` | Async driver with a real connection pool, and `register_vector` so a `vector(768)` round-trips as a Python list instead of a string. |
+| MCP server | `fastmcp` (+ `starlette`, `uvicorn`) | The brief names FastMCP. Starlette and Uvicorn come with it and carry the `/health` route and the raw ASGI trace middleware. |
+| API | `ModelContextProtocol` | The official C# MCP SDK, so the SSE client is not hand-written. |
+| API | `Serilog.AspNetCore` + `Serilog.Formatting.Compact` | The brief names Serilog. `RenderedCompactJsonFormatter` on the console, `CompactJsonFormatter` to a daily rolling file. |
+| API | `OpenTelemetry.*` (+ `Exporter.Prometheus.AspNetCore`, `Extensions.AWS`) | Traces, metrics and instrumentation from one SDK: OTLP to Jaeger, a Prometheus scrape endpoint, and the X-Ray id generator and propagator for production. |
+| API | `Microsoft.AspNetCore.OpenApi` + `Swashbuckle.AspNetCore.SwaggerUI` | .NET 10 generates the OpenAPI 3.1 document natively but ships no UI, so Swashbuckle contributes the Swagger UI assets only. |
+| API | `Microsoft.AspNetCore.Authentication.JwtBearer` + `System.IdentityModel.Tokens.Jwt` | Validation and issuing of the client-credentials JWTs. |
+| API | `Microsoft.Extensions.Caching.Memory` | In-process response cache behind `CACHE_TTL_SECONDS`. |
+| Tests | `xunit` + `Microsoft.AspNetCore.Mvc.Testing`, `pytest` + `pytest-asyncio` | The brief names xunit and pytest. `WebApplicationFactory` gives HTTP-level tests without a container. |
+| Tooling | `uv`, `ruff`, `mypy`, `dotnet format`, `k6`, Flyway, Terraform | The gates CI runs, plus the two the brief names for load testing and migrations. `uv` resolves the two Python packages as one workspace. |
+
+## 16. Requirements Coverage
+
+A reviewer's index. Sections [§1](#1-architecture-diagram) to
+[§14](#14-known-limitations--future-improvements) above are the fourteen README
+sections the brief mandates, in its order and under its titles.
+
+**Where the brief asks for a justification or documented reasoning**, each is
+answered in the README rather than only in the reports:
+
+| The brief asks | Answered in |
+| -------------- | ----------- |
+| 1.2 "clearly document your reasoning for each decision" on imputation | [§6](#6-data-decisions), per field, plus the trade-off register in [§15](#15-design-decisions--trade-offs) |
+| 1.3 derived features "with documented rationale" | [§7](#derived-features) — four features against a minimum of two |
+| 1.4 "document your choice and its embedding dimensionality" | [§7](#7-embedding-strategy) — `nomic-embed-text` v1.5 at 768 dimensions, and how the container is wired |
+| Part 2 "Migrations managed via Flyway or Alembic (your choice, justify it)" | [§5](#flyway-not-alembic) |
+| Part 2 "Include a documented query showing hybrid search" | [§5](#hybrid-query-vector-similarity--metadata-filters), with the SQL and its bind-parameter contract |
+| Part 4 "Minimal API or Controller-based — justify your choice" | [§9](#9-api-documentation) and [§15](#part-4--net-api) |
+| Part 6 "ECS (Fargate) or EKS — choose one and justify your decision" | [§12](#12-terraform-deployment) and [§15](#part-6--infrastructure-and-devops) |
+| Constraints "You may use any additional libraries — document your choices" | [§15](#library-choices) |
+
+**Constraints and rules:**
+
+| Rule | State |
+| ---- | ----- |
+| Secrets via environment variables / secrets managers, never committed | `.env` is gitignored with a complete `.env.example`; on AWS every value comes from Secrets Manager. No credential is in the tree. |
+| `docker compose up --build` starts everything, no manual step beyond `.env` | Verified from an empty Docker state — [§0](#0-status), [§3](#3-quick-start-5-commands). |
+| Python 3.12+ · .NET 10 · PostgreSQL 16 with pgvector 0.7+ | [§2](#2-prerequisites). `pgvector/pgvector:pg16` tracks current pgvector. |
+| No OpenAI or paid/hosted embedding API | Ollama serving `nomic-embed-text` as its own Compose service — [§7](#7-embedding-strategy). |
+| Code passes the linting and type checking CI configures | `ruff`, `mypy --strict` on `src`, `dotnet format --verify-no-changes` — [§13](#13-running-tests), scope explained in [§15](#part-6--infrastructure-and-devops). |
+
+**Deliverables, by part.** The tree follows the brief's repository structure —
+`README.md`, `docker-compose.yml`, `openapi.json`, `pipeline/`, `mcp-server/`,
+`api/`, `database/migrations/`, `scripts/`, `monitoring/`, `terraform/` and
+`.github/workflows/` — with `reports/` added for the per-part decision
+narratives and run artifacts.
+
+| Part | README | Decisions report | Code |
+| ---- | ------ | ---------------- | ---- |
+| 1 Data pipeline | [§5](#5-data-pipeline), [§6](#6-data-decisions), [§7](#7-embedding-strategy) | [`reports/section-1.md`](reports/section-1.md) | `pipeline/` |
+| 2 Vector database | [§5](#vector-database-part-2) | [`reports/section-2.md`](reports/section-2.md) | `database/migrations/`, `database/queries/` |
+| 3 MCP server | [§8](#8-mcp-server) | [`reports/section-3.md`](reports/section-3.md) | `mcp-server/` |
+| 4 .NET API | [§9](#9-api-documentation), [§10](#10-authentication), [§11](#11-observability) | [`reports/section-4.md`](reports/section-4.md) | `api/`, `openapi.json` |
+| 5 Embedding Atlas (bonus) | [§4](#embedding-atlas-bonus) | [`reports/section-5.md`](reports/section-5.md) | `scripts/export_embeddings_atlas.py`, `scripts/atlas/` |
+| 6 Infrastructure and DevOps | [§4](#4-service-endpoints), [§12](#12-terraform-deployment) | [`reports/section-6.md`](reports/section-6.md) | `docker-compose.yml`, `terraform/`, `.github/workflows/` |
+
+**Submission:** the repository is public at
+`github.com/francois-vz/movie-search-platform` and `docker compose up --build`
+has been run from a clean Docker state ([§0](#0-status)). The 5–10 minute
+walkthrough video is **not recorded** ⚠️, and it is the one outstanding
+deliverable. All four beats it asks for — the pipeline producing output,
+natural-language searches through the API, the Grafana dashboard, and the dev
+`terraform plan` — have something real behind them.
