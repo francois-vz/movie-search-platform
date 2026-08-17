@@ -178,16 +178,47 @@ public sealed class McpMovieSearchClient : IMovieSearchClient, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Name FastMCP uses for the synthetic wrapper it adds around non-object tool results.
+    /// </summary>
+    private const string WrapResultProperty = "result";
+
     private static string ExtractJson(CallToolResult result)
     {
         if (result.StructuredContent is { } structured)
         {
             return structured.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null
                 ? "null"
-                : structured.GetRawText();
+                : Unwrap(structured).GetRawText();
         }
 
         return result.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text ?? "null";
+    }
+
+    /// <summary>
+    /// MCP requires structuredContent to be a JSON object, so FastMCP wraps tool results that are
+    /// not objects (lists, scalars, and optionals) in {"result": ...} and advertises it with
+    /// x-fastmcp-wrap-result in the tool's output schema. Five of the six movie tools are wrapped;
+    /// only get_dataset_stats returns a bare object. Unwrapping a lone "result" property is safe
+    /// here because no tool payload we deserialize is itself a single-property "result" object.
+    /// </summary>
+    private static JsonElement Unwrap(JsonElement structured)
+    {
+        if (structured.ValueKind is not JsonValueKind.Object)
+        {
+            return structured;
+        }
+
+        using var properties = structured.EnumerateObject();
+        if (!properties.MoveNext())
+        {
+            return structured;
+        }
+
+        var only = properties.Current;
+        return !properties.MoveNext() && only.NameEquals(WrapResultProperty)
+            ? only.Value
+            : structured;
     }
 
     private async Task<McpClient> GetClientAsync(CancellationToken cancellationToken)

@@ -32,6 +32,8 @@ pytestmark = pytest.mark.skipif(
 _TOOL_CALL = re.compile(r'CallAsync\(\s*"([a-z_]+)"')
 # ["arg_name"] = ... — how the client builds every argument dictionary.
 _ARG_KEY = re.compile(r'\["([a-z_]+)"\]\s*=')
+# The constant naming FastMCP's synthetic wrapper property in the .NET client.
+_WRAP_CONST = re.compile(r'WrapResultProperty\s*=\s*"(\w+)"')
 
 
 def _client_source() -> str:
@@ -74,6 +76,38 @@ async def test_get_by_id_contract_specifically() -> None:
     registry = await _registry()
     assert "get_movie_by_id" in registry
     assert registry["get_movie_by_id"] == {"movie_id"}
+
+
+async def test_tools_returning_non_objects_wrap_their_result() -> None:
+    """Pin the envelope shape the .NET client has to unwrap.
+
+    MCP requires structuredContent to be a JSON object, so FastMCP wraps any tool
+    whose return type is not one (lists, and the `MovieResult | None` optionals) in
+    {"result": ...}. The .NET client deserialized that envelope straight into
+    List<McpMovieDto> and every search, similar, genres and by-id call 500'd; only
+    get_dataset_stats, a bare object, worked. If FastMCP ever stops wrapping, this
+    fails and McpMovieSearchClient.Unwrap must be revisited.
+    """
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+    def wraps(name: str) -> bool:
+        return bool((tools[name].output_schema or {}).get("x-fastmcp-wrap-result", False))
+
+    assert wraps("search_movies_by_description")
+    assert wraps("get_similar_movies")
+    assert wraps("list_genres")
+    assert wraps("get_movie_by_id")
+    assert wraps("get_movie_by_title")
+    # Returns a plain model, so it is the one tool delivered unwrapped.
+    assert not wraps("get_dataset_stats")
+
+
+def test_dotnet_client_unwraps_the_result_envelope() -> None:
+    """The .NET side must know the wrapper property by the name FastMCP uses."""
+    source = _client_source()
+    wrapper = _WRAP_CONST.search(source)
+    assert wrapper, "McpMovieSearchClient no longer declares WrapResultProperty"
+    assert wrapper.group(1) == "result"
 
 
 async def test_response_fields_the_api_deserializes_exist_on_the_model() -> None:

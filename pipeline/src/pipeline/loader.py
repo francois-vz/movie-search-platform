@@ -103,6 +103,19 @@ BOOL_COLUMNS = frozenset(
     }
 )
 
+# V1 declares the imputation flags NOT NULL DEFAULT FALSE. The DEFAULT only applies
+# when a column is omitted from the INSERT, and this loader always binds all of them,
+# so a missing or NA flag would bind an explicit NULL and the constraint would reject
+# the whole batch. "Absent" means "this value was not imputed", so it maps to False.
+NOT_NULL_BOOL_COLUMNS = frozenset(
+    {
+        "imdb_rating_imputed",
+        "rt_rating_imputed",
+        "production_budget_imputed",
+        "running_time_min_imputed",
+    }
+)
+
 # updated_at is intentionally absent from the SET list: the V1 trigger
 # trg_movies_updated_at stamps it on every UPDATE.
 _UPDATABLE = tuple(column for column in INSERT_COLUMNS if column not in {"title", "release_year"})
@@ -146,7 +159,7 @@ def _is_na(value: Any) -> bool:
 def _coerce(column: str, value: Any) -> Any:
     """Map a pandas cell onto the Postgres type V1 declares for the column."""
     if _is_na(value):
-        return None
+        return False if column in NOT_NULL_BOOL_COLUMNS else None
     if column in TEXT_COLUMNS:
         return str(value)
     if column in INT_COLUMNS:

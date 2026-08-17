@@ -33,9 +33,20 @@ MIGRATIONS = Path(__file__).resolve().parents[2] / "database" / "migrations"
 DIM = 768
 
 
-def _vector(seed: float) -> list[float]:
-    return [seed] * DIM
+def _vector(*direction: float) -> list[float]:
+    """Build a DIM-length vector whose direction is set by the leading components.
 
+    Fixtures must differ in *direction*, not magnitude: cosine ignores magnitude, so
+    the constant vectors this file used to seed ([0.10] * DIM, [0.11] * DIM,
+    [0.90] * DIM) were all collinear and tied at similarity 1.0. Ranking assertions
+    then depended on the physical row order Postgres happened to return rather than
+    on cosine, and flipped as soon as the rows were written in a different order.
+    """
+    return (list(direction) + [0.0] * DIM)[:DIM]
+
+
+# Cosine similarity to QUERY_VECTOR: Heat 1.0, The Matrix ~0.894, Amelie 0.0.
+QUERY_VECTOR = _vector(1.0, 0.0)
 
 ROWS: tuple[dict[str, Any], ...] = (
     {
@@ -46,7 +57,7 @@ ROWS: tuple[dict[str, Any], ...] = (
         "mpaa_rating": "R",
         "imdb_rating": 8.3,
         "rt_rating": 87,
-        "embedding": _vector(0.10),
+        "embedding": _vector(1.0, 0.0),
     },
     {
         "title": "The Matrix",
@@ -56,7 +67,7 @@ ROWS: tuple[dict[str, Any], ...] = (
         "mpaa_rating": "R",
         "imdb_rating": 8.7,
         "rt_rating": 88,
-        "embedding": _vector(0.11),
+        "embedding": _vector(1.0, 0.5),
     },
     {
         "title": "Amelie",
@@ -66,7 +77,7 @@ ROWS: tuple[dict[str, Any], ...] = (
         "mpaa_rating": "R",
         "imdb_rating": 8.4,
         "rt_rating": 89,
-        "embedding": _vector(0.90),
+        "embedding": _vector(0.0, 1.0),
     },
 )
 
@@ -128,21 +139,21 @@ async def pool(seeded: dict[str, UUID]) -> AsyncIterator[dict[str, UUID]]:
 
 async def test_hybrid_search_runs_and_ranks_by_cosine(pool: dict[str, UUID]) -> None:
     results = await db.hybrid_search(
-        _vector(0.10),
+        QUERY_VECTOR,
         genre_filter=None,
         decade=None,
         min_imdb_rating=None,
         mpaa_rating=None,
         top_k=10,
     )
-    assert [m.title for m in results][:2] == ["Heat", "The Matrix"]
+    assert [m.title for m in results] == ["Heat", "The Matrix", "Amelie"]
     assert all(m.match_type == "semantic" for m in results)
     assert results[0].similarity is not None and results[0].similarity > 0.99
 
 
 async def test_hybrid_search_applies_every_metadata_filter(pool: dict[str, UUID]) -> None:
     results = await db.hybrid_search(
-        _vector(0.10),
+        QUERY_VECTOR,
         genre_filter="Action",
         decade=1990,
         min_imdb_rating=8.5,

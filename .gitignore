@@ -64,6 +64,8 @@ reports/*
 !reports/section-4.md
 !reports/section-5.md
 !reports/section-6.md
+# Independent audit of Parts 1–5 and its resolution status.
+!reports/quality_check_1-to-5.md
 # Executed plan per part, kept alongside the section reports.
 !reports/plans/
 

@@ -15,30 +15,43 @@ section it affects, and collected in [§14](#14-known-limitations--future-improv
 
 | Part | Area | State |
 | ---- | ---- | ----- |
-| 1 | Data pipeline (clean → impute → augment → embed → load) | Code complete, 1.4/1.5 not yet run against live services ⚠️ |
+| 1 | Data pipeline (clean → impute → augment → embed → load) | Complete, run end to end against live Ollama + Postgres |
 | 2 | pgvector schema, Flyway migrations, hybrid query | Complete |
 | 3 | FastMCP server, 6 tools | Complete |
 | 4 | .NET 10 Web API | Complete, except OpenAPI examples and X-Ray ⚠️ |
 | 5 | Embedding Atlas (bonus) | Complete, colour-by-genre is a manual UI step ⚠️ |
-| 6 | Docker Compose, Terraform, CI/CD | Complete, never applied against a real AWS account ⚠️ |
+| 6 | Docker Compose, Terraform, CI/CD | Compose verified from clean; Terraform never applied against a real AWS account ⚠️ |
 | — | Walkthrough video | Not recorded ⚠️ |
 
-**What is verified.** `ruff`, `mypy --strict` and `pytest` are green (62 passed /
-4 skipped in `pipeline`, 56 passed / 6 skipped in `mcp-server`). `docker compose config`
-validates. `terraform fmt` and `terraform validate` pass on all four roots.
+**What is verified, by observation.** The platform has been brought up from an
+empty Docker state (`docker compose down -v` then `docker compose up --build`)
+and exercised the length of the chain:
 
-**What is not verified, and why.** The machine this was developed on has no .NET
-SDK and no AWS account, and a full `docker compose up --build` has not been run
-end to end. Concretely, the following are code-review-level claims rather than
-observed behaviour:
+- All ten services reach healthy; `migrate` and `pipeline` exit 0.
+- Stages 1.4 and 1.5 run for real: 3,201 augmented texts embedded through the
+  containerized Ollama at 768 dimensions, 3,200 rows upserted into pgvector, 1
+  row skipped (the untitled 2006 record). Re-running leaves the table at 3,200,
+  so idempotency holds in practice and not just in unit tests.
+- The five natural-language queries from the brief all return relevant results
+  through the .NET API, and hybrid filters (`genre`, `min_imdb_rating`,
+  `decade`) constrain correctly. `scripts/e2e_test.sh` asserts all of this.
+- Trace context propagates: a single Jaeger trace spans
+  `GET /api/v1/movies/search` → `mcp.search_movies_by_description` → the MCP
+  server, and the MCP server's JSON logs carry the same `trace_id`.
+- Rate limiting enforces 60 requests/minute per client (57 × 200, 8 × 429 over
+  65 rapid calls). Prometheus scrapes the API; the Grafana dashboard provisions.
+- `dotnet test` passes (19 tests) and `dotnet format --verify-no-changes` is
+  clean, both run in the `mcr.microsoft.com/dotnet/sdk:10.0` container.
+- p95 on search is **17ms** at the default 60/minute limit and **608µs** over
+  4,795 requests at 80 req/s with the limit raised — against a 500ms target.
+- `ruff`, `mypy` and `pytest` are green: 66 passed in `pipeline` and 64 in
+  `mcp-server` with `PIPELINE_TEST_DSN`/`MCP_TEST_DSN` pointed at the live
+  database (62 + 4 skipped and 58 + 6 skipped without one).
 
-- Stages 1.4 (embedding) and 1.5 (load). The most recent pipeline run was
-  `--dry-run`, which stops after 1.3 — see `reports/section-1-pipeline.json`,
-  where `embedding` and `load` both read `"skipped": "dry-run"`. Every number
-  quoted in [§5](#5-data-pipeline) and [§6](#6-data-decisions) comes from that
-  run and so covers 1.1–1.3 only.
-- `dotnet test` and the p95 < 500ms load-test target.
-- `terraform plan` against real AWS credentials.
+**What is still not verified.** `terraform plan`/`apply` against real AWS
+credentials — there is no account attached to this work, so everything in
+[§12](#12-terraform-deployment) remains a code-review-level claim. `terraform
+fmt` and `terraform validate` do pass on all four roots.
 
 ---
 
@@ -159,7 +172,9 @@ without restarting the stack:
 docker compose run --rm pipeline
 ```
 
-⚠️ Not yet verified end to end on a clean machine — see [§0](#0-status).
+Verified from an empty Docker state: all ten services reach healthy, `migrate`
+and `pipeline` exit 0, and the dataset lands in pgvector — see [§0](#0-status).
+Run `./scripts/e2e_test.sh` afterwards to assert the whole chain.
 
 ## 4. Service Endpoints
 
@@ -257,17 +272,30 @@ Artifacts written to `reports/` on every run: `pipeline.log` (full run log),
 `section-1-pipeline.json` (every stage report), `section-1-cleaning.json` (the
 1.1 cleaning report on its own).
 
-### Observed results (1.1–1.3, most recent `--dry-run`)
+### Observed results (full run, 1.1–1.5)
 
-3,201 rows in, 3,201 out. 0 duplicates dropped (the 24 repeated titles are
-remakes with distinct years, which the `(title, year)` key preserves). 9 titles
-arrived as JSON integers (`300`, `2012`, `1776`) and were stringified; 11 titles
-normalized in total. 22 pre-1950 classics were stored with two-digit years
-expanded into 2015–2046 and were century-corrected back to 1915–1946. 66
+**1.1 Cleaning.** 3,201 rows in, 3,201 out. 0 duplicates dropped (the 24 repeated
+titles are remakes with distinct years, which the `(title, year)` key preserves).
+9 titles arrived as JSON integers (`300`, `2012`, `1776`) and were stringified;
+11 titles normalized in total. 22 pre-1950 classics were stored with two-digit
+years expanded into 2015–2046 and were century-corrected back to 1915–1946. 66
 `us_gross` and 47 `worldwide_gross` placeholder zeros were nulled rather than
 treated as real $0. No value fell outside a sensible numeric range.
 
-⚠️ 1.4 and 1.5 have no observed numbers yet — see [§0](#0-status).
+**1.2 Imputation.** 1,992 `running_time_min`, 880 `rt_rating`, 213 `imdb_rating`
+and 1 `production_budget` filled by group median (global median as fallback);
+1,331 `director`, 605 `mpaa_rating`, 446 `creative_type`, 365 `source` and 232
+`distributor` filled with the `Unknown` sentinel. `major_genre` is left NULL.
+
+**1.3 Augmentation.** 3,201 rows carry `augmented_text` (mean 10.02 lines), none
+empty. Budget tiers: 1,305 indie, 1,197 mid, 527 major, 171 blockbuster.
+
+**1.4 Embedding.** 3,201 vectors of dimension 768 from `nomic-embed-text` over
+HTTP to the `embeddings` container, in batches of 32 — roughly 80 seconds.
+
+**1.5 Load.** 3,200 rows upserted; 1 skipped (the untitled 2006 record, which has
+no natural key). A second run reports the same 3,200 total, confirming the
+`ON CONFLICT (lower(title), release_year)` upsert is idempotent in practice.
 
 ### Schema changes
 
@@ -752,15 +780,23 @@ rebuilt between environments), applies prod, migrates, and smoke-tests prod.
 uv sync --all-packages --dev
 uv run ruff check .
 (cd pipeline   && uv run mypy src && uv run pytest -q)   # 62 passed, 4 skipped
-(cd mcp-server && uv run mypy src && uv run pytest -q)   # 56 passed, 6 skipped
+(cd mcp-server && uv run mypy src && uv run pytest -q)   # 58 passed, 6 skipped
 
 # .NET: unit + WebApplicationFactory tests (fake MCP, no Docker needed)
-dotnet test api/MovieSearch.sln
+dotnet test api/MovieSearch.sln                          # 19 passed
 dotnet format api/MovieSearch.sln --verify-no-changes
 
-# Compose integration smoke test against a running stack
+# Without a local .NET SDK, run the same gates in the SDK image:
+docker run --rm -v "$PWD/api":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
+  bash -c "dotnet restore MovieSearch.sln && dotnet test MovieSearch.sln -c Release --no-restore"
+
+# Compose integration smoke test (routing, auth, roles — no data required)
 docker compose up -d --wait api
 BASE_URL=http://localhost:8080 ./scripts/smoke_test.sh
+
+# Full end-to-end verification (requires the pipeline to have run)
+docker compose run --rm pipeline
+./scripts/e2e_test.sh
 
 # Load test (p95 < 500ms on search). Needs k6 and a live stack (or MCP_CLIENT=fake).
 k6 run scripts/load_test.js
@@ -770,29 +806,70 @@ terraform fmt -check -recursive terraform/
 terraform -chdir=terraform validate
 ```
 
-The 5 skipped Python tests split two ways. One needs `pyarrow` (the Atlas
-Parquet write path); it is in the `dev` extra, so `uv sync --all-packages --dev`
-un-skips it and CI runs it. The other four are `test_loader_integration.py`,
-which needs `PIPELINE_TEST_DSN` pointing at a live Postgres. ⚠️ CI does not
-provide one, so the 1.5 upsert and its idempotency are currently covered by unit
-tests only — adding a `services: postgres` block to the Python CI job would
-close this.
+**The two Compose test scripts differ in intent.** `smoke_test.sh` asserts only
+routing, authentication and role enforcement, so it passes against a freshly
+migrated (empty) database — that is what CI runs, since CI skips the pipeline.
+`e2e_test.sh` is the opposite: it assumes the pipeline has run and asserts that
+data flows the length of the chain, checking that every row carries a 768-dim
+vector, that the brief's five natural-language queries return results, that
+hybrid filters actually constrain, that `similar` excludes its source movie, and
+that `/stats` agrees with the row count in pgvector.
 
-⚠️ `dotnet test` and `k6 run` have not been executed locally — see [§0](#0-status).
+**Database-backed tests.** Ten tests skip unless a DSN is provided:
+`test_loader_integration.py` needs `PIPELINE_TEST_DSN` and
+`test_sql_execution.py` needs `MCP_TEST_DSN`. Both **`TRUNCATE movies`** — point
+them at a throwaway database, never one you care about, and re-run the pipeline
+afterwards:
+
+```bash
+export PIPELINE_TEST_DSN=postgresql://movies:change_me_local_only@localhost:5432/movies
+export MCP_TEST_DSN="$PIPELINE_TEST_DSN"
+(cd pipeline && uv run pytest -q)     # 66 passed
+(cd mcp-server && uv run pytest -q)   # 64 passed
+docker compose run --rm pipeline      # restore the dataset
+```
+
+⚠️ CI provides no Postgres service, so the 1.5 upsert and the SQL-against-Postgres
+checks do not run there — adding a `services: postgres` block to the Python CI
+job would close this.
 
 ## 14. Known Limitations & Future Improvements
 
 **Verification gaps** (the honest list, expanded in [§0](#0-status)):
 
-- Stages 1.4 and 1.5 have never run against a live Ollama and Postgres. Every
-  measured number in this README covers 1.1–1.3 only.
-- No `docker compose up --build` from clean on this machine; no `dotnet test`
-  (no SDK); no `terraform plan` against a real account; k6's p95 < 500ms target
-  is asserted in the script but unmeasured.
-- The loader integration tests skip without `PIPELINE_TEST_DSN` and the MCP SQL
-  execution tests skip without `MCP_TEST_DSN`. CI provides no Postgres service,
-  so neither the real upsert nor the SQL-against-Postgres checks run there.
+- `terraform plan`/`apply` has never run against a real AWS account. `fmt` and
+  `validate` pass, but nothing in [§12](#12-terraform-deployment) is observed.
+- CI provides no Postgres service, so the loader integration tests and the MCP
+  SQL execution tests skip there. They pass locally against a live database.
+- CI excludes `pipeline` and `atlas` from the Compose integration job, so the
+  embed-and-load path and the Atlas export are not exercised in CI.
 - No walkthrough video yet.
+
+**Fixed while verifying the stack end to end** (each had shipped unnoticed
+because no run had ever exercised the full chain):
+
+- The .NET MCP client deserialized FastMCP's `{"result": ...}` envelope directly
+  into the target type. MCP requires `structuredContent` to be an object, so
+  FastMCP wraps every tool whose return type is not one — five of the six here.
+  Search, similar, genres and by-id all returned 500; only `get_dataset_stats`,
+  which returns a bare object, worked. `McpMovieSearchClient` now unwraps it, and
+  `test_dotnet_contract.py` pins the contract on both sides.
+- The MCP server's `TraceIdMiddleware` subclassed Starlette's
+  `BaseHTTPMiddleware`, which is incompatible with streaming responses: every
+  `GET /sse` raised `AssertionError: Unexpected message` and logged a traceback.
+  It is now raw ASGI middleware.
+- The 1.5 loader bound an explicit NULL for any absent imputation flag, which
+  the `NOT NULL DEFAULT FALSE` columns rejected — a DEFAULT only applies to an
+  omitted column, and the loader always binds all of them. Absent now maps to
+  `FALSE`.
+- `test_sql_execution.py` seeded collinear fixture vectors (`[0.10] * 768`,
+  `[0.11] * 768`, `[0.90] * 768`). Cosine ignores magnitude, so all three tied at
+  similarity 1.0 and the "ranks by cosine" assertions were really asserting
+  physical row order. The fixtures now differ in direction.
+- `scripts/load_test.js` ramped to 20 VUs against a 60 request/minute limit
+  scoped to a single client, so 2,019 of 2,080 requests were throttled and the
+  script could not pass its own thresholds. It now derives its arrival rate from
+  the configured limit.
 
 **Functional gaps:**
 

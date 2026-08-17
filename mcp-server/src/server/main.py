@@ -8,46 +8,56 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
 from typing import Literal, cast
 
 import structlog
 import uvicorn
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config import MCPSettings, get_settings
 from . import db
 from .tools import mcp
 
 
-class TraceIdMiddleware(BaseHTTPMiddleware):
-    """Bind W3C traceparent (or a generated id) into structlog contextvars."""
+class TraceIdMiddleware:
+    """Bind W3C traceparent (or a generated id) into structlog contextvars.
 
-    async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        trace_id = _trace_id_from_request(request)
+    Written as raw ASGI rather than Starlette's ``BaseHTTPMiddleware``: the latter
+    consumes the response through an anyio stream that asserts every message is an
+    ``http.response.body``, which the SSE transport's long-lived streaming responses
+    violate — every ``GET /sse`` raised ``AssertionError: Unexpected message`` and
+    logged a traceback. Passing the scope straight through leaves streaming intact.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        trace_id = _trace_id_from_headers(Headers(scope=scope))
         structlog.contextvars.bind_contextvars(trace_id=trace_id)
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
-            structlog.contextvars.clear_contextvars()
+            structlog.contextvars.unbind_contextvars("trace_id")
 
 
-def _trace_id_from_request(request: Request) -> str:
-    traceparent = request.headers.get("traceparent")
+def _trace_id_from_headers(headers: Headers) -> str:
+    traceparent = headers.get("traceparent")
     if traceparent:
         parts = traceparent.split("-")
         if len(parts) >= 2 and parts[1]:
             return parts[1]
         return traceparent
-    request_id = request.headers.get("x-request-id")
+    request_id = headers.get("x-request-id")
     if request_id:
         return request_id
     return uuid.uuid4().hex
