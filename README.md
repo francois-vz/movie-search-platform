@@ -24,7 +24,7 @@ answered.
 | 3 | FastMCP server, 6 tools | Complete |
 | 4 | .NET 10 Web API | Complete |
 | 5 | Embedding Atlas (bonus) | Complete, opens already coloured by Major Genre |
-| 6 | Docker Compose, Terraform, CI/CD | Compose and CI/CD complete and verified; `terraform plan` clean against a real account, never applied ⚠️ |
+| 6 | Docker Compose, Terraform, CI/CD | Compose and CI/CD complete and verified; dev applied to a real AWS account and serving, seed pipeline not yet run there ⚠️ |
 | — | Walkthrough video | Not recorded ⚠️ |
 
 **What is verified, by observation.** The platform has been brought up from an
@@ -61,7 +61,15 @@ suites could not see them — indexed in
   confirmed in a browser against the shipped image.
 - `terraform plan` for dev against a real AWS account: **143 to add, 0 to change,
   0 to destroy**, no errors or warnings — the Terraform artefact the brief asks to
-  see. Nothing has been applied.
+  see.
+- That plan was then **applied**, in `eu-west-1` on 2026-08-17: 143 resources
+  created, exactly the count the plan predicted. State landed in S3 with DynamoDB
+  locking, so the backend is genuinely exercised rather than inferred. All three
+  long-lived ECS services (`api` 2/2, `mcp-server` 1/1, `embeddings` 1/1) report
+  `COMPLETED` rollouts, the ALB answers `GET /health` with 200, and the Flyway
+  `migrate` task exits 0 against the live RDS instance. Getting `mcp-server` there
+  took a forced redeployment around a real Terraform dependency bug, recorded in
+  [§14](#14-known-limitations--future-improvements).
 - p95 on search is **17ms** at the default 60/minute limit and **608µs** over
   4,795 requests at 80 req/s with the limit raised — against a 500ms target.
 - `ruff`, `mypy` and `pytest` are green: 66 passed in `pipeline` and 64 in
@@ -69,14 +77,16 @@ suites could not see them — indexed in
   pgvector container (62 + 4 skipped and 58 + 6 skipped without one). CI now
   provides that container, so all ten database-backed tests run there too.
 
-**What is still not verified.** Anything that needs a live deployment. The dev plan
-is clean, which raises [§12](#12-terraform-deployment) well above a code-review
-claim — it resolves every data source and every value it asserts — but no resource
-has been created, so nothing is proven to *run* on AWS, and X-Ray has never been
-seen in X-Ray. Two consequences worth knowing before reading §12: the plan used a
-local backend, so S3 state and DynamoDB locking are unexercised, and the ALB plans
-a single port-80 listener because HTTPS needs a certificate and there is no domain
-to get one for.
+**What is still not verified.** The deployment stops short of proving data flows
+on AWS. The `pipeline` task has not been run against the deployed database, so
+that database is migrated but **empty**, and `scripts/smoke_test.sh` and
+`scripts/e2e_test.sh` have not been run against the ALB — meaning the search path
+is proven only under Compose, not on Fargate. X-Ray has still never been seen in
+X-Ray, since generating traces needs that same traffic. There is no cost figure
+yet, only a rough estimate. Prod has never been applied. One thing to know before
+reading §12 that the apply confirmed rather than changed: the ALB serves a single
+plain-HTTP listener on port 80, because HTTPS needs a certificate and there is no
+domain to get one for.
 
 ---
 
@@ -1163,6 +1173,8 @@ aws rds describe-db-instances --query 'DBInstances[].DBInstanceIdentifier'
 | `Backend configuration changed` on init | `.terraform` is initialised against a different backend | `terraform init -reconfigure -backend-config=backend.hcl` |
 | Plan shows fewer resources than expected | `github_repository` unset, so every OIDC resource is skipped | Set it in `terraform.tfvars` |
 | Tasks stuck in `PENDING`, then `CannotPullContainerError` | Image tag missing from ECR, or built for the wrong architecture | Re-run step 4; on arm hosts add `--platform linux/amd64` |
+| A service sits at 0 running with `deployment failed: tasks failed to start`, and its events show `ResourceNotFoundException ... staging label: AWSCURRENT` | The service was created before the secret's *value* was written — see [§14](#14-known-limitations--future-improvements). The circuit breaker gives up and will not retry | Confirm the value exists (`aws secretsmanager describe-secret --secret-id <name> --query VersionIdsToStages`), then `aws ecs update-service --cluster <cluster> --service <service> --force-new-deployment` |
+| The cluster or its services appear not to exist at all | The console or CLI is in a different region; the platform is in `eu-west-1` and passes no `--region` in the scripts | `export AWS_REGION=eu-west-1`, and switch the console region picker to Ireland |
 | `embeddings` never reaches steady state | The first-boot model pull comes from Docker Hub through the single NAT gateway and can hit anonymous rate limits | Check `aws logs tail /ecs/movie-search-dev/embeddings`; retry, or point `embeddings_image` at an ECR pull-through cache |
 | Pipeline task exits non-zero with embedding timeouts | It ran before `embeddings` was healthy | Wait for `services-stable`, then re-run — the loader is idempotent |
 | Pipeline task fails fetching the dataset | `vega_datasets` fetches the CSV at runtime and needs NAT egress | Confirm the task ran in a private subnet with the NAT route |
@@ -1184,16 +1196,20 @@ Every requirement in §6.2 of the brief is implemented:
 | S3 backend + DynamoDB locking | `terraform/bootstrap`; roots set `dynamodb_table` *and* `use_lockfile` so locking survives the Terraform 1.11 deprecation |
 | Tags: Environment, Project, ManagedBy | `default_tags` on the provider in each root |
 
-⚠️ `terraform fmt -check` and `validate` pass on all four roots, and a dev
+`terraform fmt -check` and `validate` pass on all four roots, and a dev
 `terraform plan` against a real account is clean — 143 to add, 0 to change, 0 to
 destroy, no warnings — which is where the resolved values above come from rather
-than from reading HCL. **Never applied**, so there is no cost figure and no
-confirmation that the ECS task definitions start cleanly. Evidence, including the
-table of requirements read off the plan:
+than from reading HCL. That plan has since been **applied**: all 143 resources
+exist in `eu-west-1`, the ECS task definitions do start cleanly, and the state is
+in S3 under a DynamoDB lock. ⚠️ Two caveats remain: the ECS services can outrun
+the secret values they read, a dependency bug covered in
+[§14](#14-known-limitations--future-improvements), and there is still no measured
+cost figure. Evidence, including the table of requirements read off the plan:
 [`reports/section-6.md`](reports/section-6.md#terraform).
 
-**Why that plan shows no HTTPS listener.** Reading the plan, the ALB has exactly
-one listener — HTTP on port 80 — which looks like the HTTPS row above is unmet. It
+**Why there is no HTTPS listener.** The ALB has exactly one listener — HTTP on
+port 80, in the plan and now in the applied environment — which looks like the
+HTTPS row above is unmet. It
 is not a missing feature but a missing input. TLS is not a boolean: the module
 turns it on when a certificate becomes available, either `certificate_arn` for one
 that already exists or `domain_name` plus `route53_zone_id`, in which case
@@ -1201,9 +1217,9 @@ Terraform requests an ACM certificate and validates it by DNS. ACM public
 certificates require domain validation, so a certificate cannot exist without a
 domain, and this account has no hosted zone — hence no certificate, hence the
 `:443` listener and the `:80` redirect are both `count = 0` and never reach the
-plan. Supply either input and all three appear, along with an alias record.
+account. Supply either input and all three appear, along with an alias record.
 Deliberate, documented in [§14](#14-known-limitations--future-improvements), and
-the one requirement above that the plan cannot corroborate on its own.
+the one requirement above that the deployment cannot corroborate on its own.
 
 ### CI/CD
 
@@ -1309,23 +1325,41 @@ dropping the coverage.
 
 **Verification gaps** (the honest list, expanded in [§0](#0-status)):
 
-- **Nothing has been applied to AWS.** The dev plan is clean — 143 to add, no
-  errors, no warnings, against a real account — and it confirms the resolved values
-  §12 claims: RDS private and encrypted, flow logs on all traffic, CPU and memory
-  autoscaling on every service. What no plan can prove is that the resources come
-  up and talk to each other, which is the honest limit of the evidence here. It is
-  a deliberate stopping point rather than unfinished work: the plan is the Terraform
-  result this build set out to produce.
-- The plan ran with the S3 backend temporarily overridden to a local one, because
-  `terraform/bootstrap` has not been applied, so the state bucket and DynamoDB
-  lock table do not exist yet. The backend and locking configuration is therefore
-  still unexercised — the one part of §12 that a plan could have covered and did
-  not.
+- **The deployed database is empty.** Dev is applied and serving, but the
+  `pipeline` task has not been run against it, so nothing has been embedded or
+  loaded on AWS. `scripts/smoke_test.sh` and `scripts/e2e_test.sh` have likewise
+  not been run against the ALB. Routing, auth, service discovery and the Flyway
+  migration are all proven on Fargate; **search is not**. That is the honest limit
+  of the deployed evidence, and it is the gap to close first — the pipeline task
+  definition already exists, so it is one `scripts/run_ecs_task.sh` away.
+- **ECS services can start before their secrets have values.** ⚠️ A real
+  dependency bug, not a transient. `modules/rds` publishes the secret ARN from
+  `aws_secretsmanager_secret` rather than from `aws_secretsmanager_secret_version`,
+  so nothing in Terraform's graph stops `modules/compute` creating a service that
+  reads a secret which is still empty. On the first apply this took `mcp-server`
+  down: its tasks started four minutes before the DSN was written, failed with
+  `ResourceNotFoundException ... staging label: AWSCURRENT`, and the deployment
+  circuit breaker gave up rather than retrying into success. It does not
+  self-heal; `aws ecs update-service --force-new-deployment` recovers it once the
+  value exists. `api` survived only because its secrets happened to be written
+  before its tasks launched, which is luck rather than design, and it means a
+  rebuild from scratch could just as easily take `api` down instead. The fix is to
+  reference the `_version` resource's `arn`, which is the same ARN but adds the
+  missing edge.
+- **No measured cost figure.** The estimate in §12 predates the applied
+  environment and has not been checked against Cost Explorer, which lags a day.
+- CI's `terraform plan` step needs the OIDC role, so on a fork it is skipped. It
+  now emits a warning annotation and a run-summary note rather than passing
+  quietly as though all three checks ran.
+- **Prod has never been applied.** Only `environments/dev` has run against a real
+  account; the prod root remains plan- and validate-only.
 - CI's `terraform plan` step needs the OIDC role, so on a fork it is skipped. It
   now emits a warning annotation and a run-summary note rather than passing
   quietly as though all three checks ran.
 - X-Ray trace-id generation and propagation are verified locally (see
-  [§11](#11-observability)) but have never been seen in X-Ray itself.
+  [§11](#11-observability)) but have never been seen in X-Ray itself. The
+  environment that would show them now exists; what is missing is the traffic,
+  which is blocked on the empty database above.
 - No walkthrough video yet.
 
 **Fixed while verifying the stack end to end** (each had shipped unnoticed

@@ -6,9 +6,13 @@ Step-by-step deployment instructions live in the root
 [`README.md` §12](../README.md#12-terraform-deployment). This file covers the
 module layout and the design decisions behind it.
 
-> ⚠️ Validated with `terraform fmt -check`, `terraform validate` and
-> `terraform init -backend=false` on all four roots. **Never applied against a
-> real AWS account.**
+> **Applied against a real AWS account.** The dev root was applied on
+> 2026-08-17 in `eu-west-1`: 143 resources created, matching the plan exactly,
+> with state in S3 and DynamoDB locking exercised for real. All three long-lived
+> services reach a steady state and the Flyway migration task exits 0 against
+> the live RDS instance. ⚠️ The seed pipeline has not been run there yet, so the
+> deployed database is migrated but empty, and the search path is unverified on
+> AWS. Prod has never been applied.
 
 ## Why ECS Fargate, not EKS
 
@@ -94,7 +98,9 @@ drops to zero.
 - [x] **ALB with HTTPS (ACM)** — `:443` listener with a configurable
       `ssl_policy`; `:80` exists solely to redirect. Supply an existing
       `certificate_arn`, or `domain_name` + `route53_zone_id` to have Terraform
-      request and DNS-validate one.
+      request and DNS-validate one. Both listeners are `count = 0` without one,
+      which is why the applied dev ALB serves a single plain-HTTP listener on
+      `:80`: the account has no hosted zone, so no certificate can exist.
 - [x] **Auto-scaling (CPU and memory)** — two target-tracking
       `aws_appautoscaling_policy` resources per scalable service, on
       `ECSServiceAverageCPUUtilization` and `ECSServiceAverageMemoryUtilization`.
@@ -118,6 +124,20 @@ drops to zero.
   rather than read back from `module.compute`. This keeps the dependency
   one-directional: monitoring can alarm on service names without depending on
   compute.
+- **Secret values race the services that read them.** ⚠️ Known defect, exposed
+  by the first apply. `modules/rds` publishes `database_url_secret_arn` from
+  `aws_secretsmanager_secret.database_url`, not from the matching
+  `aws_secretsmanager_secret_version`, so Terraform's graph lets `modules/compute`
+  create the ECS services as soon as the empty secret *container* exists. On the
+  first apply the `mcp-server` tasks tried to start four minutes before the DSN
+  was written and failed with `ResourceNotFoundException ... staging label:
+  AWSCURRENT`; the deployment circuit breaker then gave up, leaving the service
+  at 0/1 with no self-healing. A forced redeployment fixes it after the fact
+  (`aws ecs update-service --force-new-deployment`), and pointing the output at
+  `aws_secretsmanager_secret_version.database_url.arn` would fix it properly, as
+  that attribute is the same ARN but creates the missing dependency edge. The
+  `api` service escaped only by luck of ordering: its secrets come from
+  `modules/secrets`, whose versions happened to land before its tasks launched.
 - **Atlas is not deployed.** The Part 5 bonus is a local Compose service only.
 - **`backend.hcl` and `terraform.tfvars` are gitignored** — the bucket name
   embeds the AWS account id. Copy the `.example` files and fill them in.
