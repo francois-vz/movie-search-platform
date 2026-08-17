@@ -220,10 +220,11 @@ jobs:
   terraform-validate:
     name: Terraform (fmt, validate, plan)
     runs-on: ubuntu-latest
+    # id-token only: the plan is published to the run summary, never posted as
+    # a pull request comment.
     permissions:
       contents: read
       id-token: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
