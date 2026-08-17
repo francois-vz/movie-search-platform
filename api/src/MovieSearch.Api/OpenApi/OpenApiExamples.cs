@@ -5,7 +5,9 @@ namespace MovieSearch.Api.OpenApi;
 /// <summary>
 /// Example payloads attached to the generated OpenAPI document. Values are real
 /// rows and real queries from the Vega dataset, so anything pasted out of
-/// Swagger UI returns results rather than an empty list.
+/// Swagger UI returns results rather than an empty list. The two exceptions are
+/// <see cref="MovieId"/> and the token secret, which cannot hold a value that
+/// works everywhere; both are documented as placeholders where they are used.
 /// </summary>
 internal static class OpenApiExamples
 {
@@ -39,11 +41,14 @@ internal static class OpenApiExamples
 
     public static JsonArray Genres() => new("Action", "Adventure", "Comedy", "Drama", "Horror", "Thriller");
 
+    // The secret is deliberately a placeholder rather than a plausible value:
+    // it differs per environment (.env locally, Secrets Manager in AWS), so any
+    // concrete string here would be pasted out of Swagger UI and rejected.
     public static JsonObject TokenRequest() => new()
     {
         ["grant_type"] = "client_credentials",
         ["client_id"] = "reader",
-        ["client_secret"] = "change_me_reader_secret",
+        ["client_secret"] = "$AUTH_READER_CLIENT_SECRET",
     };
 
     public static JsonObject TokenResponse() => new()

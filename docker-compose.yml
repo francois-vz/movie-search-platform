@@ -217,7 +217,10 @@ services:
       interval: 15s
       timeout: 5s
       retries: 20
-      start_period: 90s
+      # Embeddings exist only after the pipeline finishes (~3,200 rows) and
+      # Atlas then runs UMAP at startup. 90s passed on a warm local machine and
+      # expired on a hosted runner while the loader was still embedding.
+      start_period: 600s
 
 volumes:
   pgdata:

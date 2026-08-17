@@ -7,8 +7,8 @@
   },
   "servers": [
     {
-      "url": "http://localhost:8080",
-      "description": "Local Docker Compose"
+      "url": "/",
+      "description": "Origin serving this document"
     }
   ],
   "paths": {
@@ -49,7 +49,7 @@
           "Auth"
         ],
         "summary": "Issue a JWT via client credentials.",
-        "description": "Exchange a reader or admin client id/secret for a Bearer token. Accepts JSON or form-urlencoded.",
+        "description": "Exchange a reader or admin client id/secret for a Bearer token. Accepts JSON or form-urlencoded. Credentials come from AUTH_READER_CLIENT_ID/AUTH_READER_CLIENT_SECRET and the AUTH_ADMIN_* pair; substitute the value configured for this environment for the placeholder in the example.",
         "operationId": "IssueToken",
         "requestBody": {
           "content": {
@@ -60,7 +60,7 @@
               "example": {
                 "grant_type": "client_credentials",
                 "client_id": "reader",
-                "client_secret": "change_me_reader_secret"
+                "client_secret": "$AUTH_READER_CLIENT_SECRET"
               }
             },
             "application/x-www-form-urlencoded": {
@@ -70,7 +70,7 @@
               "example": {
                 "grant_type": "client_credentials",
                 "client_id": "reader",
-                "client_secret": "change_me_reader_secret"
+                "client_secret": "$AUTH_READER_CLIENT_SECRET"
               }
             }
           },
@@ -296,6 +296,7 @@
           {
             "name": "id",
             "in": "path",
+            "description": "Movie id from a /movies/search response. Ids are generated per database, so the example value above is a placeholder and will return 404.",
             "required": true,
             "schema": {
               "type": "string"
@@ -379,6 +380,7 @@
           {
             "name": "id",
             "in": "path",
+            "description": "Movie id from a /movies/search response. Ids are generated per database, so the example value above is a placeholder and will return 404.",
             "required": true,
             "schema": {
               "type": "string"
@@ -802,7 +804,7 @@
           {
             "grant_type": "client_credentials",
             "client_id": "reader",
-            "client_secret": "change_me_reader_secret"
+            "client_secret": "$AUTH_READER_CLIENT_SECRET"
           }
         ],
         "type": "object",

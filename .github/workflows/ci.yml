@@ -166,8 +166,19 @@ jobs:
       # The whole platform, exactly as the README documents it. This used to
       # start only `api` and its dependency closure, which skipped the pipeline
       # and atlas -- and, as a side effect, prometheus and grafana.
+      #
+      # Atlas is started but left out of `--wait`. It cannot report healthy
+      # until the 1.5 loader has written embeddings, and on a hosted runner that
+      # takes longer than the healthcheck window: the first run failed with
+      # "atlas is unhealthy" at 6.5 minutes while the pipeline was still at
+      # 3040/3201. Waiting on atlas would also mask a pipeline crash as an
+      # atlas timeout. `docker compose wait pipeline` below is the load gate.
       - name: Start the platform
-        run: docker compose up -d --wait
+        run: |
+          set -euo pipefail
+          services="$(docker compose config --services | grep -v '^atlas$')"
+          docker compose up -d --wait ${services}
+          docker compose up -d atlas
 
       # `up --wait` returns once containers are running or healthy; the pipeline
       # is a one-shot job that is still embedding at that point. This blocks on

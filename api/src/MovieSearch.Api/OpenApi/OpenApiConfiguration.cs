@@ -25,6 +25,17 @@ public static class OpenApiConfiguration
         ["id"] = OpenApiExamples.MovieId,
     };
 
+    /// <summary>
+    /// Descriptions for parameters whose example cannot be a working value, so
+    /// Swagger UI says what to substitute instead of failing on the prefilled one.
+    /// </summary>
+    private static readonly Dictionary<string, string> ParameterDescriptions = new(StringComparer.Ordinal)
+    {
+        ["id"] =
+            "Movie id from a /movies/search response. Ids are generated per database, "
+            + "so the example value above is a placeholder and will return 404.",
+    };
+
     public static void AddMovieSearchOpenApi(this IServiceCollection services)
     {
         services.AddOpenApi(options =>
@@ -45,7 +56,7 @@ public static class OpenApiConfiguration
                 ApplySecurityScheme(document);
                 foreach (var operation in AllOperations(document))
                 {
-                    ApplyParameterExamples(operation);
+                    ApplyParameterMetadata(operation);
                     ApplyResponseExamples(operation, document);
                 }
 
@@ -65,12 +76,15 @@ public static class OpenApiConfiguration
                 + "behind JWT Bearer auth (client credentials). Minimal APIs on .NET 10.",
         };
 
-        // Pinned rather than inferred from the request, so the document is
-        // byte-identical wherever it is generated. OpenApiSpecTests depends on
-        // that to detect drift against the committed openapi.json.
+        // Relative, so it resolves against whichever origin served the document:
+        // localhost:8080 under Compose, the load balancer in AWS. An absolute URL
+        // here would send Swagger UI's "Try it out" to that host regardless of
+        // where the page was loaded from. Staying constant also keeps the document
+        // byte-identical wherever it is generated, which OpenApiSpecTests depends
+        // on to detect drift against the committed openapi.json.
         document.Servers =
         [
-            new OpenApiServer { Url = "http://localhost:8080", Description = "Local Docker Compose" },
+            new OpenApiServer { Url = "/", Description = "Origin serving this document" },
         ];
     }
 
@@ -140,7 +154,7 @@ public static class OpenApiConfiguration
         }
     }
 
-    private static void ApplyParameterExamples(OpenApiOperation operation)
+    private static void ApplyParameterMetadata(OpenApiOperation operation)
     {
         if (operation.Parameters is null)
         {
@@ -149,11 +163,20 @@ public static class OpenApiConfiguration
 
         foreach (var parameter in operation.Parameters.OfType<OpenApiParameter>())
         {
-            if (parameter.Name is not null
-                && parameter.Example is null
-                && ParameterExamples.TryGetValue(parameter.Name, out var example))
+            if (parameter.Name is null)
+            {
+                continue;
+            }
+
+            if (parameter.Example is null && ParameterExamples.TryGetValue(parameter.Name, out var example))
             {
                 parameter.Example = example.DeepClone();
+            }
+
+            if (string.IsNullOrEmpty(parameter.Description)
+                && ParameterDescriptions.TryGetValue(parameter.Name, out var description))
+            {
+                parameter.Description = description;
             }
         }
     }
