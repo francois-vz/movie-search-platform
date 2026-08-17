@@ -930,60 +930,128 @@ structurally identical to prod, so a dev plan is a meaningful rehearsal.
 
 ### Step-by-step
 
+None of this has been applied — the ⚠️ under
+[Infrastructure requirements](#infrastructure-requirements) is the limit of the
+evidence. What follows is the execution order the modules and the dev plan imply,
+with the checkpoint after each phase that separates "the command returned" from
+"the phase worked". Budget 45–60 minutes for a first run, most of it spent
+waiting on RDS and on image pushes.
+
+**0. One shell, three variables.** The provider takes its region from
+`aws_region`, which the dev root defaults to `eu-west-1`, but
+[`scripts/run_ecs_task.sh`](scripts/run_ecs_task.sh) and the ECR login and push
+commands pass no `--region` and so follow whatever the AWS CLI's own default is.
+If the two differ, those commands fail in a way that reads like a missing
+cluster, so set the region explicitly and keep one shell for the whole session:
+
+```bash
+export AWS_REGION=eu-west-1
+export ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+export TAG=$(git rev-parse --short=12 HEAD)
+```
+
 **1. Bootstrap the state backend** (once per AWS account):
 
 ```bash
 cd terraform/bootstrap
 terraform init
-terraform apply -var=aws_region=eu-west-1
-terraform output   # note the bucket name: movie-search-tfstate-<account-id>
+terraform apply -var=aws_region="$AWS_REGION"   # no default for this variable here
+terraform output
 ```
 
-This is the only configuration in the repo that keeps state locally. It creates
-a versioned, encrypted, public-access-blocked S3 bucket and a
-point-in-time-recovery DynamoDB lock table, both with `prevent_destroy`.
+This is the only configuration in the repo that keeps state locally, because it
+creates the bucket the other roots store state in. It creates a versioned,
+encrypted, public-access-blocked S3 bucket — `movie-search-tfstate-<account-id>`,
+noncurrent versions expiring at 90 days — and a point-in-time-recovery DynamoDB
+lock table, both with `prevent_destroy`.
+
+**Checkpoint:**
+
+```bash
+aws s3api head-bucket --bucket "movie-search-tfstate-${ACCOUNT}" && echo "bucket ok"
+aws dynamodb describe-table --table-name movie-search-tf-locks \
+  --query 'Table.TableStatus' --output text      # ACTIVE
+```
 
 **2. Configure the environment root:**
 
 ```bash
 cd ../environments/dev
-cp backend.hcl.example backend.hcl              # fill in the bucket from step 1
-cp terraform.tfvars.example terraform.tfvars    # region, TLS, alarm email
+cp backend.hcl.example backend.hcl              # bucket from step 1, and the region
+cp terraform.tfvars.example terraform.tfvars    # region, GitHub repo, TLS, alarm email
 ```
 
-Both files are gitignored: the bucket name embeds the AWS account id. For TLS,
-set either `certificate_arn` (an existing ACM certificate) or `domain_name` +
-`route53_zone_id` (Terraform requests and DNS-validates one). With neither, the
-ALB serves HTTP only and the plan says so.
+Both files are gitignored: the bucket name embeds the AWS account id. Two inputs
+decide what the plan even contains:
 
-**3. Plan:**
+- **`github_repository`** (`<owner>/<repo>`) reaches further than CD. Every OIDC
+  resource in `modules/iam` is gated on
+  `local.enable_oidc = var.github_repository != null`, so leaving it unset
+  silently drops the GitHub provider and the deploy role from the plan and the
+  resource count no longer matches.
+- **TLS** switches on with either `certificate_arn` (an existing ACM
+  certificate) or `domain_name` + `route53_zone_id` (Terraform requests and
+  DNS-validates one). With neither, the ALB serves HTTP only and the plan says
+  so, for the reason the note on the missing HTTPS listener at the end of this
+  section gives.
+
+**3. Init onto the S3 backend, then plan:**
 
 ```bash
-terraform init -backend-config=backend.hcl
-terraform plan
+terraform init -reconfigure -backend-config=backend.hcl
+terraform plan -out=dev.tfplan
 ```
 
-**4. Create the ECR repositories and push images.** The services need images
-that do not exist yet on a fresh account, so apply the registry module alone
-first — a no-op on every later run:
+`-reconfigure` is required if the root was ever initialised against a different
+backend — the recorded plan used a temporary local one, because bootstrap had
+not been applied — since otherwise Terraform tries to migrate that state instead
+of adopting the S3 backend.
+
+**Checkpoint:** for dev with `github_repository` set and TLS left unset, the plan
+is **143 to add, 0 to change, 0 to destroy**. A lower count is most often a
+missing `github_repository`. Expect exactly one warning, about the deprecated
+`dynamodb_table`, which both roots set deliberately alongside `use_lockfile`; it
+is not a failure. This phase is also the first real exercise of the S3 backend
+and the lock table — to watch the lock being taken, run a second `terraform plan`
+in another shell while a long apply holds it, and it should refuse with a lock
+error naming the holder.
+
+**4. Create the ECR repositories and push images.** The repositories are
+tag-immutable and `image_tag` defaults to `"latest"`, which is never pushed, so
+the images have to exist before the main apply — and the main apply is what
+creates the services that need them. Break the cycle by applying the registry
+module alone; it is a no-op on every later run:
 
 ```bash
 terraform apply -target=module.platform.module.ecr
-aws ecr get-login-password --region eu-west-1 \
-  | docker login --username AWS --password-stdin <account>.dkr.ecr.eu-west-1.amazonaws.com
 
-TAG=$(git rev-parse --short=12 HEAD)
+aws ecr get-login-password | docker login --username AWS \
+  --password-stdin "${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+REG="${ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/movie-search-dev"
+cd ../../..                                     # repo root, for the build contexts
 for svc in api mcp-server pipeline; do
-  docker buildx build --push \
-    -t <account>.dkr.ecr.eu-west-1.amazonaws.com/movie-search-dev/$svc:$TAG ./$svc
+  docker buildx build --push -t "$REG/$svc:$TAG" "./$svc"
 done
-docker buildx build --push \
-  -t <account>.dkr.ecr.eu-west-1.amazonaws.com/movie-search-dev/migrate:$TAG ./database
+docker buildx build --push -t "$REG/migrate:$TAG" ./database
+cd terraform/environments/dev
 ```
 
-Tags are the 12-character git SHA because the repositories are tag-immutable: a
-tag names exactly one image, so a rollback is a redeploy of an older SHA rather
-than a re-tag.
+Four images, not five: `atlas` is a local-only bonus and is not deployed, which
+also spares its ~9.6 GB push. Tags are the 12-character git SHA because the
+repositories are tag-immutable: a tag names exactly one image, so a rollback is a
+redeploy of an older SHA rather than a re-tag. The task definitions declare
+`cpu_architecture = X86_64`, so on an arm host add `--platform linux/amd64` or
+the tasks fail to start with an exec format error.
+
+**Checkpoint:** all four tags resolve.
+
+```bash
+for svc in api mcp-server pipeline migrate; do
+  aws ecr describe-images --repository-name "movie-search-dev/$svc" \
+    --image-ids imageTag="$TAG" --query 'imageDetails[0].imagePushedAt' --output text
+done
+```
 
 **5. Apply:**
 
@@ -991,14 +1059,38 @@ than a re-tag.
 terraform apply -var="image_tag=$TAG"
 ```
 
-**6. Migrate the schema and seed the data.** Both are run-to-completion ECS
-tasks; the helper reads the `awsvpc` configuration from the Terraform outputs
-and waits for the task to exit:
+15–20 minutes, dominated by the RDS instance. The services set
+`wait_for_steady_state = false`, so **the apply returns before the platform is
+serving** — deliberate, because a first apply with a missing image would
+otherwise become a fifteen-minute timeout instead of a legible "cannot pull
+image" event, and the reason step 6 waits explicitly.
+
+**Checkpoint:**
 
 ```bash
-# still in terraform/environments/dev
-terraform output -json run_task_network_configuration > /tmp/netcfg.json
+terraform output api_url                                             # http://movie-search-dev-…elb.amazonaws.com
+aws s3 ls "s3://movie-search-tfstate-${ACCOUNT}/movie-search/dev/"   # state landed in S3
+```
+
+**6. Wait for the platform, then migrate and seed the data.** Compose expresses
+this ordering with `depends_on`; `aws ecs run-task` has no equivalent, so wait
+first. It matters most for `embeddings`, whose container health check greps
+`ollama list` with a 300-second start period — the service only reaches steady
+state once the model is resident on the EFS volume, and a pipeline task started
+before that retries four times and fails.
+
+```bash
 CLUSTER=$(terraform output -raw ecs_cluster_name)
+
+aws ecs wait services-stable --cluster "$CLUSTER" \
+  --services movie-search-dev-embeddings movie-search-dev-mcp-server movie-search-dev-api
+```
+
+Then the two run-to-completion tasks, in this order. The helper reads the
+`awsvpc` configuration from the Terraform outputs and waits for the task to exit:
+
+```bash
+terraform output -json run_task_network_configuration > /tmp/netcfg.json
 SCRIPTS=../../../scripts
 
 "$SCRIPTS"/run_ecs_task.sh "$CLUSTER" "$(terraform output -raw migrate_task_definition_arn)"  /tmp/netcfg.json
@@ -1010,20 +1102,72 @@ returns as soon as the task is accepted, so a migration that exits 1 still looks
 like a successful API call. The helper waits for the task to stop, reads the
 container exit code and surfaces the stop reason.
 
+**Checkpoint:** both print `Exit code: 0`, and the pipeline's own log reports
+3,200 rows upserted and 1 skipped — the same numbers as a local run, since it is
+the same dataset. Embedding 3,201 texts takes about 80 seconds locally; expect
+longer on a 1 vCPU task against a cold model.
+
+```bash
+aws logs tail /ecs/movie-search-dev/pipeline --since 20m | tail -30
+```
+
 **7. Verify:**
 
 ```bash
-terraform output api_url
 BASE_URL=$(terraform output -raw api_url) "$SCRIPTS"/smoke_test.sh
+BASE_URL=$(terraform output -raw api_url) "$SCRIPTS"/e2e_test.sh
 terraform output -raw cloudwatch_dashboard_url
 ```
+
+Run both, in that order: `smoke_test.sh` asserts routing, authentication and role
+enforcement and passes against an empty database, while `e2e_test.sh` is the one
+that proves data flowed the length of the chain ([§13](#13-running-tests)). Both
+speak plain HTTP as long as TLS is off. The client secrets are generated per
+environment and live in Secrets Manager, so the `.env` values that work locally
+do not apply here.
 
 Prod is the same sequence in `environments/prod`, but CD promotes the exact
 digests dev validated rather than rebuilding — see
 [§CI/CD](#cicd) below.
 
-**Teardown:** `terraform destroy`. Dev sets `db_deletion_protection = false` so
-this succeeds; prod does not, by design.
+**Teardown:**
+
+```bash
+terraform destroy -var="image_tag=$TAG"
+```
+
+Clean in dev by design: `db_deletion_protection = false` (so
+`skip_final_snapshot` is true), `force_destroy` on the ALB access-log bucket, and
+`force_delete` on the ECR repositories, which is what lets them go while still
+holding images. Prod sets `db_deletion_protection = true`, so the same command
+does not succeed there without a deliberate change.
+
+The bootstrap bucket and lock table **survive**, since both carry
+`prevent_destroy` — leave them, as an empty versioned bucket and an on-demand
+table cost cents and are what makes the next apply a two-command affair.
+
+**Checkpoint:** `terraform show` reports no resources, and the two expensive
+things are gone. Check them explicitly rather than trusting the destroy summary:
+
+```bash
+aws ec2 describe-nat-gateways \
+  --filter 'Name=state,Values=available' --query 'NatGateways[].NatGatewayId'
+aws rds describe-db-instances --query 'DBInstances[].DBInstanceIdentifier'
+```
+
+### Deployment troubleshooting
+
+| Symptom | Cause | Fix |
+| ------- | ----- | --- |
+| `ResourceNotFoundException` on the cluster, or ECR login rejected | `AWS_REGION` is not set in this shell, so the CLI uses its own default while Terraform uses `eu-west-1`; the scripts pass no `--region` | `export AWS_REGION=eu-west-1` and re-run in that shell |
+| `Backend configuration changed` on init | `.terraform` is initialised against a different backend | `terraform init -reconfigure -backend-config=backend.hcl` |
+| Plan shows fewer resources than expected | `github_repository` unset, so every OIDC resource is skipped | Set it in `terraform.tfvars` |
+| Tasks stuck in `PENDING`, then `CannotPullContainerError` | Image tag missing from ECR, or built for the wrong architecture | Re-run step 4; on arm hosts add `--platform linux/amd64` |
+| `embeddings` never reaches steady state | The first-boot model pull comes from Docker Hub through the single NAT gateway and can hit anonymous rate limits | Check `aws logs tail /ecs/movie-search-dev/embeddings`; retry, or point `embeddings_image` at an ECR pull-through cache |
+| Pipeline task exits non-zero with embedding timeouts | It ran before `embeddings` was healthy | Wait for `services-stable`, then re-run — the loader is idempotent |
+| Pipeline task fails fetching the dataset | `vega_datasets` fetches the CSV at runtime and needs NAT egress | Confirm the task ran in a private subnet with the NAT route |
+| Smoke test returns 401 everywhere | Secrets are generated per environment, so local `.env` credentials do not apply | Read the client secrets from Secrets Manager |
+| `data.aws_elb_service_account` error | Only affects regions opened after August 2022, which have no ELB service account | The data source has to be removed for such a region |
 
 ### Infrastructure requirements
 

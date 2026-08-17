@@ -347,12 +347,14 @@ resource "aws_cloudwatch_dashboard" "this" {
           view   = "timeSeries"
           stat   = "Average"
           period = 60
-          metrics = flatten([
+          # One level of flattening only. `flatten` recurses, which would
+          # dissolve each metric row into loose strings and fail PutDashboard.
+          metrics = concat([
             for s in var.service_names : [
               ["AWS/ECS", "CPUUtilization", "ClusterName", var.cluster_name, "ServiceName", s, { label = "${s} cpu" }],
               ["AWS/ECS", "MemoryUtilization", "ClusterName", var.cluster_name, "ServiceName", s, { label = "${s} memory" }],
             ]
-          ])
+          ]...)
         }
       },
       {

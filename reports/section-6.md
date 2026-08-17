@@ -349,7 +349,7 @@ What was actually run, not just written.
 ### Terraform
 
 `fmt -check -recursive` is clean, `validate` passes on all four roots, and the dev
-`plan` against account `209211310020` in `eu-west-1` is **143 to add, 0 to change,
+`plan` against a real AWS account in `eu-west-1` is **143 to add, 0 to change,
 0 to destroy** with no errors and no warnings.
 
 A plan is worth more than a `validate` here because it resolves data sources and
