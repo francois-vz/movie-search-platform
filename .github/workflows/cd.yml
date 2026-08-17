@@ -18,9 +18,16 @@ env:
 
 jobs:
   # Same gates as a pull request. A red CI never reaches an environment.
+  #
+  # A called workflow cannot request more than the caller grants, and this is
+  # checked when the file loads, so a missing scope here fails the whole run
+  # before any job starts. ci.yml's terraform job needs id-token for OIDC.
   ci:
     name: CI
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      id-token: write
 
   build-and-push:
     name: Build and push images
