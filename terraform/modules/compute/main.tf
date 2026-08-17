@@ -221,6 +221,10 @@ resource "aws_ecs_task_definition" "api" {
         # The sidecar below, not Jaeger.
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = local.otlp_endpoint },
         { name = "OTEL_SERVICE_NAME", value = var.service_names["api"] },
+        # Switches the API to X-Ray-shaped trace ids and the X-Amzn-Trace-Id
+        # propagator, so ids correlate with ALB access logs. Off locally, where
+        # Jaeger wants W3C.
+        { name = "AWS_XRAY_ENABLED", value = "true" },
         { name = "API_PUBLIC_URL", value = var.api_public_url },
       ]
 

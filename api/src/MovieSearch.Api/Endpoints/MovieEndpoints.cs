@@ -14,7 +14,14 @@ public static class MovieEndpoints
         var api = app.MapGroup("/api/v1")
             .RequireAuthorization()
             .RequireRateLimiting("per-user")
-            .WithTags("Movies");
+            .WithTags("Movies")
+
+            // Every route in the group is rate limited, so 429 is declared once
+            // here. RouteGroupBuilder has no Produces overload.
+            .WithMetadata(new ProducesResponseTypeMetadata(
+                StatusCodes.Status429TooManyRequests,
+                typeof(ProblemDetails),
+                ["application/problem+json"]));
 
         api.MapGet("/movies/search", Search)
             .WithName("SearchMovies")

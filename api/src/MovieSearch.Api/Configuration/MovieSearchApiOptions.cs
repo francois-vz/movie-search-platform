@@ -19,6 +19,13 @@ public sealed class MovieSearchApiOptions
     public string AdminClientSecret { get; init; } = "";
     public string OtlpEndpoint { get; init; } = "http://jaeger:4317";
 
+    /// <summary>
+    /// Switches tracing to X-Ray-compatible trace ids and the X-Ray propagator.
+    /// Off locally so Jaeger keeps W3C ids; on in ECS, where the ADOT sidecar
+    /// forwards to X-Ray and ids must match what AWS puts in ALB access logs.
+    /// </summary>
+    public bool AwsXRayEnabled { get; init; }
+
     public bool UseFakeMcp =>
         string.Equals(McpClient, "fake", StringComparison.OrdinalIgnoreCase);
 
@@ -40,9 +47,13 @@ public sealed class MovieSearchApiOptions
             AdminClientId = configuration["AUTH_ADMIN_CLIENT_ID"] ?? "admin",
             AdminClientSecret = configuration["AUTH_ADMIN_CLIENT_SECRET"] ?? "admin-secret",
             OtlpEndpoint = configuration["OTEL_EXPORTER_OTLP_ENDPOINT"] ?? "http://jaeger:4317",
+            AwsXRayEnabled = ParseBool(configuration["AWS_XRAY_ENABLED"], false),
         };
     }
 
     private static int ParseInt(string? value, int fallback) =>
         int.TryParse(value, out var parsed) ? parsed : fallback;
+
+    private static bool ParseBool(string? value, bool fallback) =>
+        bool.TryParse(value, out var parsed) ? parsed : fallback;
 }

@@ -23,6 +23,29 @@ jobs:
   python-lint-test:
     name: Python (ruff, mypy, pytest)
     runs-on: ubuntu-latest
+
+    # Ten tests across the two suites talk to Postgres and skip themselves when
+    # no DSN is set. A bare pgvector container is all they need: each applies
+    # V1/V2 itself (both are IF NOT EXISTS) and truncates what it seeds.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: movies
+          POSTGRES_PASSWORD: ci_only_password
+          POSTGRES_DB: movies
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U movies -d movies"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PIPELINE_TEST_DSN: postgresql://movies:ci_only_password@localhost:5432/movies
+      MCP_TEST_DSN: postgresql://movies:ci_only_password@localhost:5432/movies
+
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +78,28 @@ jobs:
         working-directory: mcp-server
         run: uv run pytest -q
 
+      # The database-backed modules skip themselves when the DSN is unset, which
+      # would leave this job green with none of that coverage. Assert they ran.
+      - name: Assert loader integration tests ran
+        working-directory: pipeline
+        run: |
+          set -uo pipefail
+          output="$(uv run pytest -q -rs tests/test_loader_integration.py 2>&1)"
+          echo "$output"
+          case "$output" in
+            *skipped*) echo "::error::PIPELINE_TEST_DSN is not reaching Postgres"; exit 1 ;;
+          esac
+
+      - name: Assert SQL execution tests ran
+        working-directory: mcp-server
+        run: |
+          set -uo pipefail
+          output="$(uv run pytest -q -rs tests/test_sql_execution.py 2>&1)"
+          echo "$output"
+          case "$output" in
+            *skipped*) echo "::error::MCP_TEST_DSN is not reaching Postgres"; exit 1 ;;
+          esac
+
   dotnet-lint-test:
     name: .NET (format, xunit)
     runs-on: ubuntu-latest
@@ -80,11 +125,25 @@ jobs:
   docker-build-integration:
     name: Docker build + compose integration
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
+
+      # For the live-MCP test at the end of this job.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # The atlas image alone is ~9.6 GB and this job now builds and starts
+      # everything, so headroom matters. Android and GHC are not used here.
+      # /usr/share/dotnet is deliberately left alone: setup-dotnet above put the
+      # SDK there.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Provide .env
         run: cp .env.example .env
@@ -97,17 +156,47 @@ jobs:
       - name: Build images
         run: docker compose build
 
-      # The pipeline and atlas are excluded on purpose: both are data jobs that
-      # embed the full dataset, which would dominate CI runtime without testing
-      # anything the smoke test does not already cover. Starting `api` pulls in
-      # postgres, migrate, embeddings, mcp-server and jaeger through depends_on.
-      - name: Start the platform
-        run: docker compose up -d --wait api
+      # Compose runs migrations from the stock flyway image with the SQL bind-
+      # mounted, so `compose build` never touches database/Dockerfile -- the
+      # image CD pushes to ECR for the ECS migration task. Without this, a break
+      # in it surfaces on main rather than on the pull request.
+      - name: Build the migrate image
+        run: docker build -t movie-search-migrate:ci database
 
-      - name: Smoke test
+      # The whole platform, exactly as the README documents it. This used to
+      # start only `api` and its dependency closure, which skipped the pipeline
+      # and atlas -- and, as a side effect, prometheus and grafana.
+      - name: Start the platform
+        run: docker compose up -d --wait
+
+      # `up --wait` returns once containers are running or healthy; the pipeline
+      # is a one-shot job that is still embedding at that point. This blocks on
+      # its exit code, so a failed load fails the job instead of racing the
+      # assertions below.
+      - name: Wait for the data pipeline
+        run: docker compose wait pipeline
+
+      - name: Smoke test (routing, auth, role enforcement)
         run: ./scripts/smoke_test.sh
         env:
           BASE_URL: http://localhost:8080
+
+      # The smoke test passes against an empty database, so it cannot see a
+      # broken embed-and-load path. This asserts data flows the length of the
+      # chain: pgvector -> MCP -> .NET API.
+      - name: End-to-end test (loaded data)
+        run: ./scripts/e2e_test.sh
+        env:
+          BASE_URL: http://localhost:8080
+
+      # Every other .NET test substitutes FakeMovieSearchClient. This is the only
+      # place the real SSE client speaks to a real MCP server, which is how the
+      # FastMCP result-envelope bug got through in the first place.
+      - name: .NET tests against the live MCP server
+        working-directory: api
+        env:
+          MCP_INTEGRATION_URL: http://localhost:8000
+        run: dotnet test MovieSearch.sln -c Release --filter "FullyQualifiedName~LiveMcpTests"
 
       - name: Service logs on failure
         if: failure()
@@ -155,6 +244,22 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # Without this the job reports a green "fmt, validate, plan" having run two
+      # of the three, which is the kind of quiet gap that is worse than a red
+      # build. Annotate rather than fail: a fork has no way to supply the role,
+      # and blocking it would make the repository unusable to a reviewer.
+      - name: Report that plan was skipped
+        if: vars.AWS_DEPLOY_ROLE_ARN == ''
+        run: |
+          message="terraform plan skipped: AWS_DEPLOY_ROLE_ARN is not set, so no provider credentials are available. fmt and validate ran; only plan reaches the provider schema and the AWS API."
+          echo "::warning title=Terraform plan skipped::${message}"
+          {
+            echo "### Terraform"
+            echo ""
+            echo "- \`fmt\` and \`validate\`: ran on all four roots."
+            echo "- \`plan\`: **skipped**. ${message}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Plan (dev)
         if: steps.aws.outcome == 'success'
         working-directory: terraform/environments/dev
@@ -163,5 +268,15 @@ jobs:
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="region=${{ vars.AWS_REGION }}"
           terraform plan -input=false -no-color -out=tfplan
+
+          # Surfaced in the run summary so the plan is reviewable from the PR
+          # without digging through logs.
+          {
+            echo "### Terraform plan (dev)"
+            echo ""
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
           TF_VAR_github_repository: ${{ github.repository }}

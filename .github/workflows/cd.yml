@@ -98,6 +98,10 @@ jobs:
           build pipeline   ./pipeline   ./pipeline/Dockerfile
           build migrate    ./database   ./database/Dockerfile
 
+          # No `atlas` here on purpose. It is a local-only bonus that reads
+          # embeddings straight from Postgres, and Terraform does not deploy it
+          # (terraform/README.md). CI still builds it so the image cannot rot.
+
   deploy-dev:
     name: Deploy dev
     needs: build-and-push
@@ -172,8 +176,11 @@ jobs:
     name: Deploy prod
     needs: [build-and-push, deploy-dev]
     runs-on: ubuntu-latest
-    # The manual approval gate. Configure required reviewers on the `prod`
-    # environment in the repository settings; the job blocks until one approves.
+    # The manual approval gate. The `prod` environment carries a
+    # required_reviewers protection rule, so this job blocks until a reviewer
+    # approves it. The rule lives in repository settings rather than in this
+    # file; verify with:
+    #   gh api repos/OWNER/REPO/environments/prod --jq '.protection_rules'
     environment: prod
     permissions:
       contents: read

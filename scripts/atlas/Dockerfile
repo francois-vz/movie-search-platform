@@ -18,6 +18,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY scripts/export_embeddings_atlas.py /app/scripts/export_embeddings_atlas.py
 COPY database/queries/atlas_export.sql /app/database/queries/atlas_export.sql
+# Imported by the CLI via `--with atlas_color_by`; the entrypoint puts this
+# directory on PYTHONPATH. See the module for why the colour-by column cannot be
+# passed as a CLI option.
+COPY scripts/atlas/atlas_color_by.py /app/scripts/atlas/atlas_color_by.py
 COPY scripts/atlas/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

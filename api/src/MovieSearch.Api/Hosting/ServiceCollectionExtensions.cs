@@ -13,6 +13,9 @@ using MovieSearch.Application.Caching;
 using MovieSearch.Domain;
 using MovieSearch.Infrastructure.Fake;
 using MovieSearch.Infrastructure.Mcp;
+using OpenTelemetry;
+using OpenTelemetry.Context.Propagation;
+using OpenTelemetry.Extensions.AWS.Trace;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -48,7 +51,9 @@ public static class ServiceCollectionExtensions
         MovieSearchApiOptions options,
         IHostEnvironment environment)
     {
-        var useFake = options.UseFakeMcp || environment.IsEnvironment("Testing");
+        // Deliberately the strict check, not IsTestEnvironment: the whole point
+        // of IntegrationTesting is to reach a real MCP server.
+        var useFake = options.UseFakeMcp || environment.IsEnvironment(HostEnvironmentExtensions.Testing);
         if (useFake)
         {
             services.AddSingleton<FakeMovieSearchClient>();
@@ -171,6 +176,22 @@ public static class ServiceCollectionExtensions
         MovieSearchApiOptions options,
         IHostEnvironment environment)
     {
+        if (options.AwsXRayEnabled)
+        {
+            // X-Ray rejects W3C-random trace ids: the high 32 bits must be the
+            // epoch seconds of the trace start. AddXRayTraceId below generates
+            // ids in that shape, and the propagator reads and writes the
+            // X-Amzn-Trace-Id header the ALB and the ADOT sidecar use. W3C
+            // tracecontext stays in the composite so the MCP server, which
+            // only understands traceparent, still joins the same trace.
+            Sdk.SetDefaultTextMapPropagator(new CompositeTextMapPropagator(
+            [
+                new AWSXRayPropagator(),
+                new TraceContextPropagator(),
+                new BaggagePropagator(),
+            ]));
+        }
+
         var otel = services.AddOpenTelemetry()
             .ConfigureResource(resource => resource.AddService("movie-search-api"))
             .WithMetrics(metrics =>
@@ -186,7 +207,12 @@ public static class ServiceCollectionExtensions
                 tracing.AddAspNetCoreInstrumentation();
                 tracing.AddHttpClientInstrumentation();
                 tracing.AddSource(McpTelemetry.ActivitySourceName);
-                if (!environment.IsEnvironment("Testing"))
+                if (options.AwsXRayEnabled)
+                {
+                    tracing.AddXRayTraceId();
+                }
+
+                if (!environment.IsTestEnvironment())
                 {
                     tracing.AddOtlpExporter(otlp =>
                     {

@@ -7,4 +7,11 @@ scrape_configs:
     static_configs:
       - targets: ["api:8080"]
 
-  # TODO: add mcp-server metrics target if/when exposed.
+  # The MCP server deliberately exposes no /metrics endpoint, so there is no
+  # second target here. MCP tool call latency -- the one MCP signal the brief
+  # asks the dashboard to show -- is already recorded by the API's McpTelemetry
+  # meter and scraped above. Measuring it a second time inside the MCP server
+  # would add a dependency and a port to publish the same number, minus the
+  # queue and connection-reuse time the caller actually experiences. The MCP
+  # server's contribution to tracing comes through Jaeger, where its spans are
+  # children of the API's.

@@ -13,6 +13,10 @@ public static class AuthEndpoints
             .WithSummary("Issue a JWT via client credentials.")
             .WithDescription("Exchange a reader or admin client id/secret for a Bearer token. Accepts JSON or form-urlencoded.")
             .AllowAnonymous()
+
+            // The handler takes HttpRequest so it can accept either content type,
+            // which leaves nothing for OpenAPI to infer about the body.
+            .Accepts<TokenRequest>("application/json", "application/x-www-form-urlencoded")
             .Produces<TokenResponse>(StatusCodes.Status200OK)
             .Produces<ProblemDetails>(StatusCodes.Status400BadRequest)
             .Produces<ProblemDetails>(StatusCodes.Status401Unauthorized);

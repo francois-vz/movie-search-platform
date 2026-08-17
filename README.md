@@ -18,14 +18,16 @@ section it affects, and collected in [§14](#14-known-limitations--future-improv
 | 1 | Data pipeline (clean → impute → augment → embed → load) | Complete, run end to end against live Ollama + Postgres |
 | 2 | pgvector schema, Flyway migrations, hybrid query | Complete |
 | 3 | FastMCP server, 6 tools | Complete |
-| 4 | .NET 10 Web API | Complete, except OpenAPI examples and X-Ray ⚠️ |
-| 5 | Embedding Atlas (bonus) | Complete, colour-by-genre is a manual UI step ⚠️ |
-| 6 | Docker Compose, Terraform, CI/CD | Compose verified from clean; Terraform never applied against a real AWS account ⚠️ |
+| 4 | .NET 10 Web API | Complete |
+| 5 | Embedding Atlas (bonus) | Complete, opens already coloured by Major Genre |
+| 6 | Docker Compose, Terraform, CI/CD | Compose and CI/CD complete and verified; `terraform plan` clean against a real account, never applied ⚠️ |
 | — | Walkthrough video | Not recorded ⚠️ |
 
-**What is verified, by observation.** The platform has been brought up from an
-empty Docker state (`docker compose down -v` then `docker compose up --build`)
-and exercised the length of the chain:
+**What is verified, by observation.** Full evidence log, including the five bugs
+the first end-to-end run exposed and why the test suites could not see them:
+[`reports/verification.md`](reports/verification.md). The platform has been
+brought up from an empty Docker state (`docker compose down -v` then
+`docker compose up --build`) and exercised the length of the chain:
 
 - All ten services reach healthy; `migrate` and `pipeline` exit 0.
 - Stages 1.4 and 1.5 run for real: 3,201 augmented texts embedded through the
@@ -40,18 +42,31 @@ and exercised the length of the chain:
   server, and the MCP server's JSON logs carry the same `trace_id`.
 - Rate limiting enforces 60 requests/minute per client (57 × 200, 8 × 429 over
   65 rapid calls). Prometheus scrapes the API; the Grafana dashboard provisions.
-- `dotnet test` passes (19 tests) and `dotnet format --verify-no-changes` is
-  clean, both run in the `mcr.microsoft.com/dotnet/sdk:10.0` container.
+- `dotnet test` passes (22 tests) and `dotnet format --verify-no-changes` is
+  clean. Five further tests run only against a live MCP server
+  (`MCP_INTEGRATION_URL`) and pass: they exercise the real SSE client for all six
+  tools, which is what the rest of the .NET suite cannot do because it
+  substitutes a fake.
+- OpenAPI: the served document carries examples on every model, parameter and
+  200 response, and the committed root `openapi.json` is generated from it by
+  `scripts/export_openapi.sh`, with a test asserting the two match.
+- X-Ray trace-id generation and `X-Amzn-Trace-Id` propagation verified locally
+  with `AWS_XRAY_ENABLED=true` — see [§11](#11-observability).
+- Atlas opens with points already coloured by `major_genre`, data table intact,
+  confirmed in a browser against the shipped image.
+- `terraform plan` for dev against a real AWS account: **143 to add, 0 to change,
+  0 to destroy**, no errors or warnings. Nothing has been applied.
 - p95 on search is **17ms** at the default 60/minute limit and **608µs** over
   4,795 requests at 80 req/s with the limit raised — against a 500ms target.
 - `ruff`, `mypy` and `pytest` are green: 66 passed in `pipeline` and 64 in
-  `mcp-server` with `PIPELINE_TEST_DSN`/`MCP_TEST_DSN` pointed at the live
-  database (62 + 4 skipped and 58 + 6 skipped without one).
+  `mcp-server` with `PIPELINE_TEST_DSN`/`MCP_TEST_DSN` pointed at a throwaway
+  pgvector container (62 + 4 skipped and 58 + 6 skipped without one). CI now
+  provides that container, so all ten database-backed tests run there too.
 
-**What is still not verified.** `terraform plan`/`apply` against real AWS
-credentials — there is no account attached to this work, so everything in
-[§12](#12-terraform-deployment) remains a code-review-level claim. `terraform
-fmt` and `terraform validate` do pass on all four roots.
+**What is still not verified.** `terraform apply`. The dev plan is clean against a
+real account, which raises [§12](#12-terraform-deployment) well above a
+code-review claim — the plan resolves every data source and every value it
+asserts — but no resource has been created, so nothing is proven to *run* on AWS.
 
 ---
 
@@ -200,9 +215,13 @@ Run `./scripts/e2e_test.sh` afterwards to assert the whole chain.
 vectors. The service polls until 1.5 has written embeddings, exports Parquet,
 then runs UMAP (cosine, seed 42). Decisions: [`reports/section-5.md`](reports/section-5.md).
 
-**Colour by genre:** Color by Field → `major_genre`. ⚠️ Atlas has no `--color`
-CLI flag and its `initialState` default is unreliable, so this stays a manual
-click rather than shipped configuration.
+**Colour by genre:** already applied on load — no clicking. Atlas has no `--color`
+flag and the CLI serves its props verbatim, so `scripts/atlas/atlas_color_by.py`
+injects `defaultChartsConfig.embedding.data.category` in-process, loaded via
+`--with`. `ATLAS_COLOR_BY` picks the column and an empty value restores stock
+behaviour (Color by Field → `major_genre` by hand). Why it works this way, and why
+`initialState.charts` would have hidden the data table:
+[`reports/section-5.md`](reports/section-5.md#why-this-needed-a-patch).
 
 **How to read it:** same-colour blobs are genres that cluster in embedding space
 (Action vs Drama). Mixed neighbourhoods are genre-ambiguous plots or thin
@@ -563,9 +582,11 @@ Search query parameters: `q` (required), `top_k` (default 10, max 50), `genre`,
 
 API-only iteration (no MCP/Postgres): `MCP_CLIENT=fake docker compose run --no-deps --service-ports api`
 
-⚠️ The auto-generated spec carries schemas and the Bearer scheme but **no
-examples**; the examples live only in the hand-maintained root `openapi.json`,
-which can therefore drift from the served document.
+The generated spec carries schemas, the Bearer scheme and examples on every
+model, parameter and 200 response, so Swagger UI's "Try it out" is pre-filled.
+The root `openapi.json` is generated from the served document by
+`scripts/export_openapi.sh`, and `OpenApiSpecTests` asserts the two match, so
+drift fails CI rather than accumulating.
 
 ## 10. Authentication
 
@@ -589,12 +610,29 @@ reader on an admin route → 403. Signing key / issuer / audience come from
 | Signal | Where |
 | ------ | ----- |
 | Logs | JSON on the API container stdout (Serilog `RenderedCompactJsonFormatter`); rolling files at `/app/logs/api-*.log`. The MCP server logs structured JSON via structlog. The pipeline logs plain text to stdout and `reports/pipeline.log`. |
-| Traces | Jaeger UI `http://localhost:16686` (OTLP gRPC `jaeger:4317`). The MCP server reads `traceparent` off inbound HTTP; the .NET side relies on `HttpClientInstrumentation` rather than explicit wiring on the MCP transport, so end-to-end propagation is ⚠️ unverified. |
+| Traces | Jaeger UI `http://localhost:16686` (OTLP gRPC `jaeger:4317`). The MCP server reads `traceparent` off inbound HTTP; the .NET side propagates it through `HttpClientInstrumentation`. Verified: one trace spans `GET /api/v1/movies/search` → `mcp.search_movies_by_description` → the MCP server, whose JSON logs carry the same `trace_id`. |
 | Metrics | Prometheus `http://localhost:9090` scrapes `api:8080/metrics`. Grafana `http://localhost:3000` (admin/admin from `.env`) loads the **Movie Search** dashboard: request rate, latency p50/p95/p99, 5xx rate, MCP tool latency, active connections. |
 
-⚠️ No AWS X-Ray exporter is configured, so the brief's "X-Ray in production"
-requirement is met at the infrastructure layer (the IAM and monitoring modules
-provision it) but not in application code.
+### Production tracing (AWS X-Ray)
+
+Local and production differ only in trace-id format and the propagator, both
+switched by `AWS_XRAY_ENABLED` (false locally, set true by the ECS task
+definition):
+
+| | Local | ECS |
+| --- | --- | --- |
+| Exporter | OTLP → Jaeger | OTLP → ADOT collector sidecar → X-Ray |
+| Trace ids | W3C random | X-Ray (`AddXRayTraceId`: high 32 bits are the trace-start epoch seconds) |
+| Propagator | `tracecontext` + `baggage` | `AWSXRayPropagator` first, then `tracecontext` + `baggage` |
+
+X-Ray rejects W3C-random ids, which is why the id generator has to change and not
+just the exporter. The composite keeps `tracecontext` so the MCP server — which
+only understands `traceparent` — still joins the same trace.
+
+Verified locally with the flag forced on: an inbound
+`X-Amzn-Trace-Id: Root=1-5759e988-bd862e3fe1be46a994272793` produced spans on
+trace `5759e988bd862e3fe1be46a994272793`, and generated ids carried the request
+timestamp in their prefix. ⚠️ Never observed in X-Ray itself — no AWS account.
 
 ## 12. Terraform Deployment
 
@@ -738,16 +776,20 @@ Every requirement in §6.2 of the brief is implemented:
 | All secrets via Secrets Manager, none hardcoded | `modules/secrets`, `modules/rds` (DB credential + full DSN); injected into tasks as `secrets`, never `environment` |
 | Tasks use IAM roles, no access keys | `modules/iam` task + execution roles; GitHub Actions authenticates via OIDC |
 | RDS in private subnets only | `modules/rds`: `publicly_accessible = false`, dedicated subnet group, `storage_encrypted = true` |
-| ALB with HTTPS (ACM) | `modules/alb`: `:443` listener, configurable `ssl_policy`, `:80` redirects to `:443` |
+| ALB with HTTPS (ACM) | `modules/alb`: `:443` listener, configurable `ssl_policy`, `:80` redirects to `:443` — but **dormant until a certificate is supplied**, and no domain exists to get one for ([§14](#14-known-limitations--future-improvements)) |
 | Auto-scaling (CPU and memory) | `modules/compute`: two `aws_appautoscaling_policy` target-tracking policies per service |
 | VPC Flow Logs | `modules/networking`, retention configurable |
 | S3 backend + DynamoDB locking | `terraform/bootstrap`; roots set `dynamodb_table` *and* `use_lockfile` so locking survives the Terraform 1.11 deprecation |
 | Tags: Environment, Project, ManagedBy | `default_tags` on the provider in each root |
 
-⚠️ Validated with `terraform fmt -check`, `terraform validate` and
-`terraform init -backend=false` on all four roots. **Never applied against a
-real AWS account**, so there is no plan output, no cost figure, and no
-confirmation that the ECS task definitions start cleanly.
+⚠️ `terraform fmt -check` and `validate` pass on all four roots, and a dev
+`terraform plan` against a real account is clean — 143 to add, 0 to change, 0 to
+destroy, no warnings — which is where the resolved values above come from rather
+than from reading HCL. The exception is the HTTPS row: with no certificate the
+plan plans a single port-80 listener, exactly as described above. **Never
+applied**, so there is no cost figure and no confirmation that the ECS task
+definitions start cleanly. Evidence:
+[`reports/verification.md`](reports/verification.md#terraform-against-a-real-aws-account).
 
 ### CI/CD
 
@@ -783,8 +825,17 @@ uv run ruff check .
 (cd mcp-server && uv run mypy src && uv run pytest -q)   # 58 passed, 6 skipped
 
 # .NET: unit + WebApplicationFactory tests (fake MCP, no Docker needed)
-dotnet test api/MovieSearch.sln                          # 19 passed
+dotnet test api/MovieSearch.sln              # 22 passed, 5 skipped (live-MCP)
 dotnet format api/MovieSearch.sln --verify-no-changes
+
+# The 5 skipped tests are the only ones that speak to a real MCP server.
+# Point them at a running one to include them:
+MCP_INTEGRATION_URL=http://localhost:8000 \
+  dotnet test api/MovieSearch.sln --filter "FullyQualifiedName~LiveMcpTests"   # 5 passed
+
+# Regenerate the committed openapi.json from the live document. The same test
+# asserts it in CI, so drift fails the build.
+./scripts/export_openapi.sh
 
 # Without a local .NET SDK, run the same gates in the SDK image:
 docker run --rm -v "$PWD/api":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
@@ -794,8 +845,10 @@ docker run --rm -v "$PWD/api":/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 \
 docker compose up -d --wait api
 BASE_URL=http://localhost:8080 ./scripts/smoke_test.sh
 
-# Full end-to-end verification (requires the pipeline to have run)
-docker compose run --rm pipeline
+# Full end-to-end verification. `up --wait` returns once containers are running,
+# so wait for the one-shot pipeline to exit before asserting on data.
+docker compose up -d --wait
+docker compose wait pipeline
 ./scripts/e2e_test.sh
 
 # Load test (p95 < 500ms on search). Needs k6 and a live stack (or MCP_CLIENT=fake).
@@ -808,7 +861,8 @@ terraform -chdir=terraform validate
 
 **The two Compose test scripts differ in intent.** `smoke_test.sh` asserts only
 routing, authentication and role enforcement, so it passes against a freshly
-migrated (empty) database — that is what CI runs, since CI skips the pipeline.
+migrated (empty) database — which also means it cannot detect a broken
+embed-and-load path.
 `e2e_test.sh` is the opposite: it assumes the pipeline has run and asserts that
 data flows the length of the chain, checking that every row carries a 768-dim
 vector, that the brief's five natural-language queries return results, that
@@ -829,20 +883,30 @@ export MCP_TEST_DSN="$PIPELINE_TEST_DSN"
 docker compose run --rm pipeline      # restore the dataset
 ```
 
-⚠️ CI provides no Postgres service, so the 1.5 upsert and the SQL-against-Postgres
-checks do not run there — adding a `services: postgres` block to the Python CI
-job would close this.
+CI runs all ten: the Python job has a `pgvector/pgvector:pg16` service and sets
+both DSNs. Because these modules skip themselves when a DSN is missing, CI also
+asserts they actually ran, so a broken DSN fails the job instead of quietly
+dropping the coverage.
 
 ## 14. Known Limitations & Future Improvements
 
 **Verification gaps** (the honest list, expanded in [§0](#0-status)):
 
-- `terraform plan`/`apply` has never run against a real AWS account. `fmt` and
-  `validate` pass, but nothing in [§12](#12-terraform-deployment) is observed.
-- CI provides no Postgres service, so the loader integration tests and the MCP
-  SQL execution tests skip there. They pass locally against a live database.
-- CI excludes `pipeline` and `atlas` from the Compose integration job, so the
-  embed-and-load path and the Atlas export are not exercised in CI.
+- **`terraform apply` has never run.** The dev plan is clean (143 to add, no
+  errors, no warnings) against a real account, and it confirms the resolved
+  values §12 claims — RDS private and encrypted, flow logs on all traffic, CPU
+  and memory autoscaling on every service. What a plan cannot prove is that the
+  resources come up and talk to each other. This is the one remaining gap of
+  consequence.
+- The plan ran with the S3 backend temporarily overridden to a local one, because
+  `terraform/bootstrap` has not been applied, so the state bucket and DynamoDB
+  lock table do not exist yet. The backend and locking configuration is therefore
+  still unexercised.
+- CI's `terraform plan` step needs the OIDC role, so on a fork it is skipped. It
+  now emits a warning annotation and a run-summary note rather than passing
+  quietly as though all three checks ran.
+- X-Ray trace-id generation and propagation are verified locally (see
+  [§11](#11-observability)) but have never been seen in X-Ray itself.
 - No walkthrough video yet.
 
 **Fixed while verifying the stack end to end** (each had shipped unnoticed
@@ -873,13 +937,28 @@ because no run had ever exercised the full chain):
 
 **Functional gaps:**
 
-- The auto-generated OpenAPI document has no examples, and the root
-  `openapi.json` is maintained by hand rather than emitted by a build step, so
-  the two can drift.
-- Atlas colour-by-genre is a documented UI click, not shipped configuration.
-- No X-Ray exporter in the .NET application code.
+- **HTTPS is off**, because TLS switches on only when a certificate is available
+  and there is no domain to get one for: ACM public certificates require domain
+  validation and the account has no Route53 hosted zone. The Terraform is
+  complete — supply `certificate_arn`, or `domain_name` plus `route53_zone_id` and
+  Terraform requests and DNS-validates the certificate itself — at which point
+  port 80 becomes a redirect, a 443 listener appears with the configured
+  `ssl_policy`, and an alias record is created. Worth closing before any real
+  deployment, since until then the ALB would carry bearer tokens in plaintext.
+- **Atlas colour-by-genre is a patch against a third-party seam.**
+  `scripts/atlas/atlas_color_by.py` wraps the `embedding-atlas` CLI's prop builder
+  to set `defaultChartsConfig.embedding.data.category`, because the CLI has no
+  option for colour and returns its props verbatim when serving. It works and is
+  browser-verified, but it leans on internals that a minor release could move, so
+  it fails open: an unexpected props shape logs a warning and serves stock Atlas.
+  The mechanism, and why `initialState.charts` was the wrong instrument, are in
+  [`reports/section-5.md`](reports/section-5.md#why-this-needed-a-patch).
 - The Compose `api` healthcheck probes liveness `/health` rather than
-  `/health/ready`, so the container reports healthy before MCP is reachable.
+  `/health/ready`, so the container reports healthy before MCP is reachable. This
+  is deliberate: `/health` is unconditionally 200 so Compose does not restart the
+  API while it waits for MCP, and `api` already gates on
+  `mcp-server: condition: service_healthy`, so ordering is enforced by the
+  dependency rather than by the probe.
 
 **Design limitations:**
 
@@ -889,8 +968,13 @@ because no run had ever exercised the full chain):
   must be revisited if the dataset is refreshed.
 - One row of 3,201 (the untitled 2006 record) is skipped by the loader because
   it has no natural key and so cannot upsert idempotently.
-- A handful of values remain hardcoded despite the "no hardcoded values" goal:
-  the "high IMDB rating" threshold of 7.5 in `filters.py`, the top-k bounds in
-  `tools.py`, and the HTTP timeout in `embeddings.py`.
+- One value remains hardcoded despite the "no hardcoded values" goal:
+  `REQUEST_TIMEOUT_SECONDS = 120.0` in `pipeline/src/pipeline/embedding.py`. The
+  MCP server's policy values are all configurable — `HIGH_IMDB_THRESHOLD`,
+  `MCP_TOP_K_MAX` and `EMBEDDING_TIMEOUT_SECONDS` in `mcp-server/src/config.py`.
+  (`filters.py` still defines `HIGH_IMDB_THRESHOLD = 7.5`, but as the module
+  default that the tool layer overrides from settings.) `TOP_K_MIN = 1` and the
+  default `top_k` of 10 stay in code deliberately: one is an invariant, the other
+  is fixed by the brief.
 - HNSW is indexed but the planner will likely sequential-scan at 3.2k rows. The
   index matters only if the corpus grows.

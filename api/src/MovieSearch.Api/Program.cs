@@ -20,7 +20,7 @@ builder.Host.UseSerilog((context, _, logger) =>
         .ReadFrom.Configuration(context.Configuration)
         .Enrich.FromLogContext()
         .WriteTo.Console(new RenderedCompactJsonFormatter());
-    if (!context.HostingEnvironment.IsEnvironment("Testing"))
+    if (!context.HostingEnvironment.IsTestEnvironment())
     {
         logger.WriteTo.File(
             new CompactJsonFormatter(),

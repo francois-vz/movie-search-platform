@@ -1,7 +1,13 @@
 # ============================================================================
 # Movie Search Platform — local orchestration
 # Bring up the entire platform:  docker compose up --build
-# Run the one-shot data pipeline:  docker compose run --rm pipeline
+#   That is the only command needed: the pipeline runs as part of it. See the
+#   `pipeline` service below for re-running it on demand or in dry-run mode.
+#
+# Health checks: every long-lived service has one, and every depends_on uses an
+# explicit condition. `pipeline` and `migrate` deliberately have none -- both are
+# run-to-completion jobs, so "healthy" is not a state they hold; dependents wait
+# on them with service_completed_successfully instead.
 # ============================================================================
 
 x-common-env: &common-env
@@ -30,6 +36,10 @@ services:
   # ---- DB migrations (Flyway) -----------------------------------------------
   # Applies database/migrations on a healthy postgres. After editing V1/V2
   # locally: docker compose down -v  (Flyway versions are forward-only).
+  #
+  # No healthcheck: this exits once the schema is current. Dependents use
+  # service_completed_successfully. On AWS the same SQL ships inside
+  # database/Dockerfile, because an ECS task has nothing to bind-mount.
   migrate:
     image: flyway/flyway:10.22.0
     <<: *common-env
@@ -76,6 +86,11 @@ services:
   # Re-run on demand:  docker compose run --rm pipeline
   # Transform only (1.1-1.3, no database or embedding server):
   #   docker compose run --rm --no-deps pipeline --dry-run
+  #
+  # No healthcheck, for the same reason as `migrate`: it exits when the load
+  # finishes. `docker compose up --wait` returns once containers are running, so
+  # anything asserting on loaded data must `docker compose wait pipeline` first
+  # -- see the CI job.
   pipeline:
     build: ./pipeline
     restart: "no"
