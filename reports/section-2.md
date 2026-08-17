@@ -104,8 +104,8 @@ cannot infer the index and the upsert silently becomes an insert;
 | `release_date`, `release_year` | 1.1 Point 3 | Year is the unique-key half and the decade input |
 | `major_genre`, `mpaa_rating`, `director`, `distributor`, `creative_type`, `source` | 1.1 | MCP filters + NL queries + Atlas colour-by-genre |
 | `imdb_rating`, `imdb_votes`, `rt_rating`, `production_budget`, `us_gross`, `worldwide_gross`, `running_time_min` | 1.1 Point 4 | Filters, stats, "small budget" / RT queries |
-| `budget_tier`, `decade`, `rating_score_delta`, `blockbuster_flag` | 1.3 (empty until then) | MCP `decade` filter + derived-feature brief |
-| `*_imputed` booleans | 1.2 (empty until then) | Provenance so search never treats filled values as observed |
+| `budget_tier`, `decade`, `rating_score_delta`, `blockbuster_flag` | 1.3 | MCP `decade` filter + derived-feature brief |
+| `*_imputed` booleans | 1.2 | Provenance so search never treats filled values as observed |
 | `augmented_text`, `embedding vector(768)` | 1.4 / 1.5 | Embedding payload; 768 = `nomic-embed-text` |
 | `pipeline_version`, `created_at`, `updated_at` | audit | Brief requirement; trigger stamps `updated_at` |
 

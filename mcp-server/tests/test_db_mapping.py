@@ -27,7 +27,7 @@ def test_row_to_movie_coerces_types() -> None:
         similarity=Decimal("0.95"),
         match_type="semantic",
     )
-    movie = row_to_movie(row)  # type: ignore[arg-type]
+    movie = row_to_movie(row)
     assert movie.id == str(movie_id)
     assert movie.title == ""
     assert movie.imdb_rating == 8.7
@@ -51,6 +51,6 @@ def test_row_to_movie_carries_match_type_for_fuzzy_hits() -> None:
         similarity=0.42,
         match_type="fuzzy",
     )
-    movie = row_to_movie(row)  # type: ignore[arg-type]
+    movie = row_to_movie(row)
     assert movie.match_type == "fuzzy"
     assert movie.similarity == 0.42

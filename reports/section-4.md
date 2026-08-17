@@ -18,28 +18,35 @@ The plan this part was built from: [plans/part-4-dotnet-api.plan.md](plans/part-
 - **Get-by-id:** there is no `get_movie_by_title` mapping. The API calls
   **`get_movie_by_id(movie_id)`**.
 
-## Ask for Part 3 — add `get_movie_by_id`
+## Ask for Part 3 — `get_movie_by_id` — **resolved**
 
-Please add this tool alongside the five in the brief. `MovieResult` already has
-`id: str`, and `get_similar_movies` already takes `movie_id`, so lookup-by-id is
-implied on the MCP side.
+Part 3 now registers this tool, so `GET /api/v1/movies/{id}` works against the
+real MCP server and `MCP_CLIENT=fake` is no longer a workaround for it.
 
 ```python
 @mcp.tool()
 async def get_movie_by_id(movie_id: str) -> MovieResult | None:
-    """Retrieve a specific movie by primary key (UUID string)."""
+    """Retrieve a specific movie by its unique identifier."""
 ```
 
 Frozen DTO field set (snake_case on the MCP wire, camelCase on the REST API):
 
 - `MovieResult`: `id`, `title`, `release_year`, `major_genre`, `mpaa_rating`,
-  `director`, `distributor`, `imdb_rating`, `rt_rating`, `similarity`
+  `director`, `distributor`, `imdb_rating`, `rt_rating`, `similarity`,
+  and now `match_type` (`semantic` | `exact` | `fuzzy` | `lookup`) which says
+  how to read `similarity`. `McpMovieDto` ignores unknown properties, so this
+  is additive; map it into the REST DTO if it becomes useful to clients.
 - `DatasetStats`: `total_movies`, `genres`, `year_min`, `year_max`, `avg_imdb_rating`
 
 SSE endpoint expected by the .NET client: `{MCP_SERVER_URL}/sse`
 (default `http://mcp-server:8000/sse`).
 
-Until that tool exists, run the API with `MCP_CLIENT=fake`.
+The mismatch was invisible to both test suites — .NET tests substitute
+`FakeMovieSearchClient`, and the Python tests never read the C#.
+`mcp-server/tests/test_dotnet_contract.py` now closes that hole from the Python
+side: it parses `McpMovieSearchClient.cs` for every tool name and argument key
+and asserts each exists in the FastMCP registry. A .NET-side integration test
+against a live server is still worth adding.
 
 ## Layout
 
