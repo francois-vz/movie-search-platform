@@ -27,7 +27,8 @@ services:
       retries: 10
 
   # ---- DB migrations (Flyway) -----------------------------------------------
-  # TODO: run migrations from ./database/migrations before pipeline/mcp start.
+  # Applies database/migrations on a healthy postgres. After editing V1/V2
+  # locally: docker compose down -v  (Flyway versions are forward-only).
   migrate:
     image: flyway/flyway:10
     <<: *common-env
@@ -66,6 +67,9 @@ services:
       start_period: 60s
 
   # ---- Data pipeline (runs and exits) ---------------------------------------
+  # 1.1 does not need postgres/embeddings: run with
+  #   docker compose run --rm --no-deps pipeline
+  # Restore a full `docker compose run pipeline` (honouring depends_on) in 1.4/1.5.
   pipeline:
     build: ./pipeline
     <<: *common-env
@@ -88,6 +92,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       embeddings:
         condition: service_healthy
     healthcheck:
@@ -140,15 +146,28 @@ services:
       - "16686:16686"   # UI
       - "4317:4317"     # OTLP gRPC
 
-  # ---- Embedding visualization (bonus) --------------------------------------
+  # ---- Embedding visualization (bonus, Part 5) ------------------------------
+  # Reader only: polls until 1.5 has written embeddings, exports Parquet, then
+  # serves Embedding Atlas. Do not depends_on pipeline yet — 1.1 exits without
+  # vectors. After 1.5, the wait loop is enough.
   atlas:
-    build: ./scripts/atlas
+    build:
+      context: .
+      dockerfile: scripts/atlas/Dockerfile
     <<: *common-env
     ports:
       - "7000:7000"
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7000"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
 
 volumes:
   pgdata:

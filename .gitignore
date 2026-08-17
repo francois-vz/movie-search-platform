@@ -2,6 +2,12 @@
 .env
 *.env
 !.env.example
+# Never commit AWS credentials. Put them in ~/.aws/ (outside this repo).
+.aws/
+**/credentials
+*.pem
+*.key
+!*.pub
 
 # ---- Python ----
 __pycache__/
@@ -30,18 +36,30 @@ TestResults/
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json
 !*.tfvars.example
 crash.log
+crash.*.log
 override.tf
 override.tf.json
+# Keep lockfile tracked; ignore local override secrets if someone names them this way
+secrets.auto.tfvars
+*.secret.tfvars
 
 # ---- Data / artifacts ----
 data/
 *.parquet
 atlas_export/
 # Ignore runtime report artifacts but keep the living Section reports.
-# reports/*
-# !reports/section-1.md
+reports/*
+!reports/section-1.md
+!reports/section-2.md
+!reports/section-3.md
+!reports/section-4.md
+!reports/section-5.md
+
+# API log files (Serilog file sink)
+api/**/logs/
 
 # ---- OS / editor ----
 .DS_Store

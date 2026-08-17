@@ -13,9 +13,20 @@ jobs:
 
   dotnet-lint-test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
     steps:
       - uses: actions/checkout@v4
-      # TODO: setup-dotnet 10; dotnet format --verify-no-changes; dotnet test
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Restore
+        run: dotnet restore MovieSearch.sln
+      - name: Format
+        run: dotnet format MovieSearch.sln --verify-no-changes --no-restore
+      - name: Test
+        run: dotnet test MovieSearch.sln --configuration Release --no-restore
 
   docker-build-integration:
     runs-on: ubuntu-latest

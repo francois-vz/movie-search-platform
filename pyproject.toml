@@ -1,0 +1,29 @@
+[project]
+name = "movie-search-platform"
+version = "0.1.0"
+description = "Intelligent movie search platform (uv workspace)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "movie-search-pipeline",
+    "movie-search-mcp",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "pyarrow>=16",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["pipeline", "mcp-server"]
+
+[tool.uv.sources]
+movie-search-pipeline = { workspace = true }
+movie-search-mcp = { workspace = true }

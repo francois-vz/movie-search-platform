@@ -21,6 +21,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
     "mypy>=1.10",
+    "pyarrow>=16",
 ]
 
 [tool.ruff]
@@ -33,6 +34,8 @@ strict = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.setuptools]
 packages = ["src", "src.pipeline"]

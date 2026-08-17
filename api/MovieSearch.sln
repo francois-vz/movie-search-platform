@@ -1,13 +1,42 @@
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Scaffold placeholder — regenerate with:
-#   dotnet new sln -n MovieSearch
-#   dotnet sln add src/MovieSearch.Api src/MovieSearch.Application \
-#                  src/MovieSearch.Domain src/MovieSearch.Infrastructure \
-#                  tests/MovieSearch.Tests
-#
-# Project layout (Clean Architecture):
-#   MovieSearch.Api            -> entry point, middleware, DI, endpoints, auth
-#   MovieSearch.Application    -> use cases, MCP client orchestration
-#   MovieSearch.Domain         -> entities, value objects, interfaces
-#   MovieSearch.Infrastructure -> MCP client impl, HTTP clients, caching
-#   MovieSearch.Tests          -> unit + integration tests
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79FBC6}") = "MovieSearch.Api", "src/MovieSearch.Api/MovieSearch.Api.csproj", "{3F6A1C8E-9D2B-4A71-B5E0-0C8F4D2A91B3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79FBC6}") = "MovieSearch.Application", "src/MovieSearch.Application/MovieSearch.Application.csproj", "{7B4E2A91-C3D8-4F06-9E1A-6D5C8B7A2F10}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79FBC6}") = "MovieSearch.Domain", "src/MovieSearch.Domain/MovieSearch.Domain.csproj", "{A12C9E44-8F3B-4D71-91C6-2E7B5A0D3C88}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79FBC6}") = "MovieSearch.Infrastructure", "src/MovieSearch.Infrastructure/MovieSearch.Infrastructure.csproj", "{C8D4F201-6A9E-4B35-8F17-1C3E9D0A7B54}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79FBC6}") = "MovieSearch.Tests", "tests/MovieSearch.Tests/MovieSearch.Tests.csproj", "{E5B7A319-2D4C-4F80-B6E1-9A8C0D2F7E63}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{3F6A1C8E-9D2B-4A71-B5E0-0C8F4D2A91B3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3F6A1C8E-9D2B-4A71-B5E0-0C8F4D2A91B3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3F6A1C8E-9D2B-4A71-B5E0-0C8F4D2A91B3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3F6A1C8E-9D2B-4A71-B5E0-0C8F4D2A91B3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7B4E2A91-C3D8-4F06-9E1A-6D5C8B7A2F10}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7B4E2A91-C3D8-4F06-9E1A-6D5C8B7A2F10}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7B4E2A91-C3D8-4F06-9E1A-6D5C8B7A2F10}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7B4E2A91-C3D8-4F06-9E1A-6D5C8B7A2F10}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A12C9E44-8F3B-4D71-91C6-2E7B5A0D3C88}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A12C9E44-8F3B-4D71-91C6-2E7B5A0D3C88}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A12C9E44-8F3B-4D71-91C6-2E7B5A0D3C88}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A12C9E44-8F3B-4D71-91C6-2E7B5A0D3C88}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C8D4F201-6A9E-4B35-8F17-1C3E9D0A7B54}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C8D4F201-6A9E-4B35-8F17-1C3E9D0A7B54}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C8D4F201-6A9E-4B35-8F17-1C3E9D0A7B54}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C8D4F201-6A9E-4B35-8F17-1C3E9D0A7B54}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E5B7A319-2D4C-4F80-B6E1-9A8C0D2F7E63}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E5B7A319-2D4C-4F80-B6E1-9A8C0D2F7E63}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E5B7A319-2D4C-4F80-B6E1-9A8C0D2F7E63}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E5B7A319-2D4C-4F80-B6E1-9A8C0D2F7E63}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

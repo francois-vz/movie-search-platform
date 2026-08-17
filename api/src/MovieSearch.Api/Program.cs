@@ -1,19 +1,72 @@
-// Entry point for the Movie Search .NET 10 Web API.
-//
-// TODO (Part 4):
-//   - Serilog (JSON console + file sink)
-//   - OpenTelemetry traces (Jaeger/X-Ray) + metrics (Prometheus /metrics)
-//   - JWT bearer auth + /auth/token (reader/admin roles)
-//   - MCP client (Infrastructure) wired via DI
-//   - Endpoints: /health, /api/v1/movies/search, /{id}, /{id}/similar,
-//                /api/v1/movies/genres, /api/v1/stats
-//   - Response caching, rate limiting (60/min), request timeout (30s)
-//   - OpenAPI 3.1 at /openapi/v1.json + Swagger UI at /swagger
+using MovieSearch.Api.Configuration;
+using MovieSearch.Api.Endpoints;
+using MovieSearch.Api.Hosting;
+using MovieSearch.Api.OpenApi;
+using OpenTelemetry.Metrics;
+using Serilog;
+using Serilog.Formatting.Compact;
 
 var builder = WebApplication.CreateBuilder(args);
+var options = MovieSearchApiOptions.From(builder.Configuration);
+
+if (string.IsNullOrWhiteSpace(options.JwtSigningKey) || options.JwtSigningKey.Length < 32)
+{
+    throw new InvalidOperationException("JWT_SIGNING_KEY must be at least 32 characters.");
+}
+
+builder.Host.UseSerilog((context, _, logger) =>
+{
+    logger
+        .ReadFrom.Configuration(context.Configuration)
+        .Enrich.FromLogContext()
+        .WriteTo.Console(new RenderedCompactJsonFormatter());
+    if (!context.HostingEnvironment.IsEnvironment("Testing"))
+    {
+        logger.WriteTo.File(
+            new CompactJsonFormatter(),
+            path: "logs/api-.log",
+            rollingInterval: RollingInterval.Day);
+    }
+});
+
+builder.Services.AddMovieSearchApi(options, builder.Environment);
+builder.Services.AddMovieSearchTelemetry(options, builder.Environment);
+builder.Services.AddMovieSearchOpenApi();
 
 var app = builder.Build();
 
-app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+app.UseSerilogRequestLogging();
+app.UseExceptionHandler(errorApp =>
+{
+    errorApp.Run(async context =>
+    {
+        var problem = new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Status = StatusCodes.Status500InternalServerError,
+            Title = "Internal Server Error",
+            Detail = "An unexpected error occurred while processing the request.",
+        };
+        context.Response.StatusCode = problem.Status.Value;
+        context.Response.ContentType = "application/problem+json";
+        await context.Response.WriteAsJsonAsync(problem);
+    });
+});
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseRateLimiter();
+app.UseRequestTimeouts();
+
+app.MapOpenApi("/openapi/v1.json");
+app.UseSwaggerUI(swagger =>
+{
+    swagger.SwaggerEndpoint("/openapi/v1.json", "Movie Search API v1");
+    swagger.RoutePrefix = "swagger";
+});
+app.MapPrometheusScrapingEndpoint("/metrics");
+app.MapHealthEndpoints();
+app.MapAuthEndpoints();
+app.MapMovieEndpoints();
 
 app.Run();
+
+public partial class Program;

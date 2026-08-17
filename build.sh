@@ -2,9 +2,10 @@
 # Build the data pipeline image and (optionally) run it.
 #
 #   ./build.sh            # build the pipeline image
-#   ./build.sh --run      # build, then run Section 1 cleaning once
+#   ./build.sh --run      # build, then run Section 1.1 cleaning once
 #
-# The pipeline itself is executed via:  docker compose run --rm pipeline
+# 1.1 execution (no database / embeddings required):
+#   docker compose run --rm --no-deps pipeline
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -18,9 +19,10 @@ echo ">> Building pipeline image..."
 docker compose build pipeline
 
 if [[ "${1:-}" == "--run" ]]; then
-  echo ">> Running pipeline (Section 1 cleaning)..."
-  docker compose run --rm pipeline
+  echo ">> Running pipeline (Section 1.1 cleaning, --no-deps: no postgres/embeddings yet)..."
+  docker compose run --rm --no-deps pipeline
 else
-  echo ">> Done. Run the pipeline with:"
-  echo "     docker compose run --rm pipeline"
+  echo ">> Done. Run the 1.1 pipeline with:"
+  echo "     docker compose run --rm --no-deps pipeline"
+  echo "   (Use --no-deps until 1.4/1.5 need postgres + embeddings.)"
 fi
